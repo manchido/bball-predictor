@@ -16,8 +16,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas import PredictionResponse, TodayPredictionsResponse
 from src.scrapers.injuries import InjuryScraper
+from src.scrapers.live_schedule import LiveScheduleFetcher
 from src.scrapers.odds import OddsClient
-from src.scrapers.realgm import RealGMScraper
 from src.pipeline.features import FEATURE_COLS, build_matchup_features
 from src.pipeline.silver_to_gold import load_gold
 from src.injury.adjuster import InjuryAdjuster
@@ -66,7 +66,7 @@ async def predict_today(
     now = datetime.now(_TZ)
     warnings: list[str] = []
 
-    scraper = RealGMScraper()
+    scraper = LiveScheduleFetcher()
     injury_scraper = InjuryScraper()
     odds_client = OddsClient()
 

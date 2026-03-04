@@ -1,0 +1,293 @@
+"""
+Live schedule fetcher — today's upcoming games from official per-league APIs.
+
+Replaces RealGMScraper.fetch_today_schedule() which fails due to Cloudflare.
+
+Sources
+───────
+  EuroLeague / EuroCup → api-live.euroleague.net/v2  (official, no auth)
+  BBL / BSL            → api.sofascore.com           (unofficial, browser headers)
+  ACB                  → www.acb.com HTML calendar   (HTML, best-effort)
+
+Each league returns the same game-dict schema used by _predict_games:
+  {game_id, date, home_team, away_team, home_team_id, away_team_id,
+   league, season, status}
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from src.utils.ids import make_game_id, get_team_id
+from src.utils.logging import logger
+
+_UTC = ZoneInfo("UTC")
+
+EL_BASE = "https://api-live.euroleague.net/v2"
+SF_BASE = "https://api.sofascore.com/api/v1"
+ACB_BASE = "https://www.acb.com"
+
+HEADERS_EL = {
+    "Accept": "application/json",
+    "User-Agent": "BballPredictor/1.0 (research)",
+}
+HEADERS_SF = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.sofascore.com/",
+}
+HEADERS_ACB = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+}
+
+# Current season codes — update each October
+_EL_CURRENT: dict[str, tuple[str, str, str]] = {
+    # league → (competition_code, season_code, season_label)
+    "euroleague": ("E", "E2025", "2025-26"),
+    "eurocup":    ("U", "U2025", "2025-26"),
+}
+
+_SF_CURRENT: dict[str, tuple[int, int, str]] = {
+    # league → (tournament_id, season_id, season_label)
+    "bbl": (227, 79994, "2025-26"),
+    "bsl": (519, 81036, "2025-26"),
+}
+
+_ACB_SEASON_YEAR = 2025  # temporada_id = start year of current season
+
+
+@retry(
+    retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=15),
+    reraise=True,
+)
+async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | list:
+    resp = await client.get(url, timeout=20, **kwargs)
+    resp.raise_for_status()
+    return resp.json()
+
+
+class LiveScheduleFetcher:
+    """Fetch today's scheduled games using official per-league APIs."""
+
+    async def fetch_today(self, league: str) -> list[dict]:
+        """Return game-dicts for today's scheduled / live games in `league`."""
+        today = date.today()
+        try:
+            if league in _EL_CURRENT:
+                return await self._fetch_el_today(league, today)
+            if league in _SF_CURRENT:
+                return await self._fetch_sf_today(league, today)
+            if league == "acb":
+                return await self._fetch_acb_today(today)
+        except Exception:
+            logger.exception("LiveScheduleFetcher failed for league={}", league)
+        return []
+
+    # ------------------------------------------------------------------
+    # EuroLeague / EuroCup
+    # ------------------------------------------------------------------
+    async def _fetch_el_today(self, league: str, today: date) -> list[dict]:
+        comp, season_code, season_label = _EL_CURRENT[league]
+        url = f"{EL_BASE}/competitions/{comp}/seasons/{season_code}/games"
+
+        async with httpx.AsyncClient(headers=HEADERS_EL, timeout=20) as c:
+            # Fetch all season games — status=None games are missed by gameStatus filter
+            # Date filtering is done locally below
+            data = await _get_json(c, url, params={"limit": 500})
+        games_raw = data.get("data", data) if isinstance(data, dict) else data
+
+        results: list[dict] = []
+        for g in games_raw if isinstance(games_raw, list) else []:
+            raw_date = g.get("utcDate") or g.get("date") or ""
+            try:
+                gdate = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(_UTC).date()
+            except Exception:
+                continue
+            if gdate != today:
+                continue
+
+            home_raw = (g.get("local") or {}).get("club", {}).get("name", "")
+            away_raw = (g.get("road")  or {}).get("club", {}).get("name", "")
+            if not home_raw or not away_raw:
+                continue
+
+            results.append(_build_game_dict(today, home_raw, away_raw, league, season_label))
+
+        logger.info("LiveScheduleFetcher [{}]: {} games today", league, len(results))
+        return results
+
+    # ------------------------------------------------------------------
+    # SofaScore (BBL / BSL)
+    # ------------------------------------------------------------------
+    async def _fetch_sf_today(self, league: str, today: date) -> list[dict]:
+        t_id, s_id, season_label = _SF_CURRENT[league]
+        today_start = int(datetime.combine(today, datetime.min.time(), tzinfo=_UTC).timestamp())
+        today_end   = today_start + 86_400
+
+        results: list[dict] = []
+        async with httpx.AsyncClient(headers=HEADERS_SF, timeout=20) as c:
+            for page in range(5):
+                url = f"{SF_BASE}/unique-tournament/{t_id}/season/{s_id}/events/next/{page}"
+                try:
+                    data = await _get_json(c, url)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        break
+                    raise
+                events = data.get("events", [])
+                if not events:
+                    break
+
+                for e in events:
+                    ts = e.get("startTimestamp", 0)
+                    if ts >= today_end:
+                        # All remaining events are in the future — stop paging
+                        return results
+                    if today_start <= ts < today_end:
+                        home_raw = e.get("homeTeam", {}).get("name", "")
+                        away_raw = e.get("awayTeam", {}).get("name", "")
+                        if home_raw and away_raw:
+                            results.append(
+                                _build_game_dict(today, home_raw, away_raw, league, season_label)
+                            )
+
+                await asyncio.sleep(0.5)
+
+        logger.info("LiveScheduleFetcher [{}]: {} games today", league, len(results))
+        return results
+
+    # ------------------------------------------------------------------
+    # ACB (Spanish Liga Endesa) — HTML calendar best-effort
+    # ------------------------------------------------------------------
+    async def _fetch_acb_today(self, today: date) -> list[dict]:
+        """
+        Scrape the ACB calendar page and find games scheduled for today.
+        ACB game IDs appear as links: /partido/estadisticas/id/{id}
+        We then fetch each game's page to extract team names and date.
+        """
+        season_label = "2025-26"
+        cal_url = f"{ACB_BASE}/calendario/index/temporada_id/{_ACB_SEASON_YEAR}"
+
+        async with httpx.AsyncClient(headers=HEADERS_ACB, timeout=30, follow_redirects=True) as c:
+            try:
+                resp = await c.get(cal_url)
+                resp.raise_for_status()
+                html = resp.text
+            except Exception as exc:
+                logger.warning("ACB calendar fetch failed: {}", exc)
+                return []
+
+        game_ids = sorted(set(re.findall(r"/partido/estadisticas/id/(\d{4,8})", html)))
+        if not game_ids:
+            logger.warning("ACB: no game IDs found in calendar HTML")
+            return []
+
+        # Sample a few recent game IDs and check if any are scheduled for today
+        results: list[dict] = []
+        async with httpx.AsyncClient(headers=HEADERS_ACB, timeout=25, follow_redirects=True) as c:
+            for gid in game_ids[-30:]:  # check last 30 (most recent)
+                try:
+                    await asyncio.sleep(1.5)
+                    resp = await c.get(f"{ACB_BASE}/partido/estadisticas/id/{gid}")
+                    resp.raise_for_status()
+                    game_dict = _parse_acb_game_html(resp.text, gid, today, season_label)
+                    if game_dict:
+                        results.append(game_dict)
+                except Exception:
+                    continue
+
+        logger.info("LiveScheduleFetcher [acb]: {} games today", len(results))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# ACB HTML parser (minimal — just date + team names)
+# ---------------------------------------------------------------------------
+
+def _parse_acb_game_html(html: str, game_id_raw: str, today: date, season_label: str) -> dict | None:
+    """Return a game dict if the ACB page shows a game scheduled for today."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+
+    # Date is in a <div class="datos"> or similar element
+    date_text = ""
+    for tag in soup.find_all(["span", "div", "td"], class_=re.compile(r"fecha|date|datos", re.I)):
+        text = tag.get_text(strip=True)
+        # Try to parse Spanish date formats: "Martes, 3 de marzo de 2026"
+        m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", text, re.I)
+        if m:
+            date_text = text
+            break
+
+    if not date_text:
+        return None
+
+    MONTHS_ES = {
+        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+        "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+        "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+    }
+    m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", date_text, re.I)
+    if not m:
+        return None
+    try:
+        day = int(m.group(1))
+        month = MONTHS_ES.get(m.group(2).lower(), 0)
+        year = int(m.group(3))
+        game_date = date(year, month, day)
+    except Exception:
+        return None
+
+    if game_date != today:
+        return None
+
+    # Extract team names from score header
+    home_raw = away_raw = ""
+    team_tags = soup.find_all(class_=re.compile(r"nombre|team[-_]name|equipo", re.I))
+    if len(team_tags) >= 2:
+        away_raw = team_tags[0].get_text(strip=True)
+        home_raw = team_tags[1].get_text(strip=True)
+
+    if not home_raw or not away_raw:
+        return None
+
+    return _build_game_dict(today, home_raw, away_raw, "acb", season_label)
+
+
+# ---------------------------------------------------------------------------
+# Shared helper
+# ---------------------------------------------------------------------------
+
+def _build_game_dict(
+    game_date: date,
+    home_raw: str,
+    away_raw: str,
+    league: str,
+    season: str,
+) -> dict:
+    return {
+        "game_id":      make_game_id(game_date, home_raw, away_raw),
+        "date":         game_date.isoformat(),
+        "home_team":    home_raw,
+        "away_team":    away_raw,
+        "home_team_id": get_team_id(home_raw),
+        "away_team_id": get_team_id(away_raw),
+        "league":       league,
+        "season":       season,
+        "status":       "scheduled",
+    }

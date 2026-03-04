@@ -38,7 +38,7 @@ async def run_daily_pipeline() -> None:
 
     from src.scrapers.injuries import InjuryScraper
     from src.scrapers.odds import OddsClient
-    from src.scrapers.realgm import RealGMScraper
+    from src.scrapers.live_schedule import LiveScheduleFetcher
     from src.pipeline.silver_to_gold import load_gold
     from src.injury.adjuster import InjuryAdjuster
     from src.models.ensemble import BballEnsemble
@@ -51,7 +51,7 @@ async def run_daily_pipeline() -> None:
         logger.error("No trained model found — skipping daily pipeline. Run 'train' first.")
         return
 
-    scraper = RealGMScraper()
+    scraper = LiveScheduleFetcher()
     injury_scraper = InjuryScraper()
     odds_client = OddsClient()
     gold_df = load_gold()
@@ -60,7 +60,7 @@ async def run_daily_pipeline() -> None:
 
     for league in LEAGUES:
         try:
-            games = await scraper.fetch_today_schedule(league)
+            games = await scraper.fetch_today(league)
             if not games:
                 logger.info("No games today: {}", league)
                 continue

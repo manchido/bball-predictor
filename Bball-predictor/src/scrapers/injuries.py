@@ -1,9 +1,14 @@
 """
 Injury / Player Availability Scraper.
 
-Tries to fetch current injury reports from RealGM.
-Returns empty dict on any failure so the rest of the pipeline
-can proceed without adjustment (graceful fallback).
+Primary source: RealGM — Cloudflare-blocked (403) for all leagues as of 2026-03.
+No free alternative found for EuroLeague/EuroCup/ACB/BBL/BSL:
+  - SofaScore: /team/{id}/injuries → 404 for basketball
+  - EuroLeague API: no player status endpoint available
+  - ESPN: only covers NBA/NCAAB
+
+Returns empty dict on any failure so the pipeline proceeds without injury
+adjustment (InjuryAdjuster.apply_adjustment is a no-op when data is absent).
 
 Output format:
   {team_id: ["player_name_1", "player_name_2", ...]}  # unavailable players
@@ -62,9 +67,8 @@ class InjuryScraper:
                 html = resp.text
             return _parse_injury_html(html)
         except Exception as exc:
-            logger.warning(
-                "Injury scrape failed for league={} ({}). Using empty fallback.", league, exc
-            )
+            # RealGM is Cloudflare-blocked (403); no free alternative available.
+            logger.debug("Injury data unavailable for league={}: {}", league, exc)
             return {}
 
 

@@ -115,8 +115,6 @@ class RealGMScraper:
         await self._throttle()
         async with httpx.AsyncClient(headers=HEADERS, timeout=30) as client:
             logger.debug("GET {}", url)
-            resp = client.get(url)  # type: ignore[assignment]
-            # httpx async
             resp = await client.get(url)
             resp.raise_for_status()
             html = resp.text

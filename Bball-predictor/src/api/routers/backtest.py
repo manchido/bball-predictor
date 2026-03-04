@@ -47,8 +47,7 @@ async def run_backtest(request: BacktestRequest) -> BacktestMetrics:
             detail=f"No data in range {request.start_date} – {request.end_date}",
         )
 
-    available = [c for c in FEATURE_COLS if c in subset.columns]
-    X = subset[FEATURE_COLS].fillna(0).values.astype(np.float32)
+    X = subset.reindex(columns=FEATURE_COLS, fill_value=0).values.astype(np.float32)
     actuals = (subset["home_points"] + subset["away_points"]).values
 
     preds = ensemble.predict(X, game_ids=subset["game_id"].tolist())

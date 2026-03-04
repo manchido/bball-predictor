@@ -15,6 +15,7 @@ All timestamps are stored in America/St_Johns (UTC-3:30).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,24 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDSPORTAL_BASE = "https://www.oddsportal.com"
+
+# ---------------------------------------------------------------------------
+# football.com / sportybet factsCenter API
+# Same Sporty Group backend — football.com has no AWS WAF, prefer it.
+# EuroLeague is the only target league covered (sr:tournament:138).
+# Market 18 = main Over/Under total (half-point lines, decimal odds).
+# ---------------------------------------------------------------------------
+FOOTBALLCOM_API = "https://www.football.com/api/ng/factsCenter"
+FOOTBALLCOM_EL_TOURNAMENT = "sr:tournament:138"   # EuroLeague
+FOOTBALLCOM_TOTAL_MARKET_ID = "18"
+FOOTBALLCOM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.football.com/",
+}
 
 ODDSPORTAL_LEAGUE_PATHS: dict[str, str] = {
     "euroleague": "/basketball/europe/euroleague",
@@ -104,20 +123,37 @@ class OddsClient:
     async def fetch_today_odds(self, league: str) -> dict[str, OddsRecord]:
         """
         Return {game_id: OddsRecord} for today's games in `league`.
-        Tries The Odds API first; falls back to OddsPortal.
+
+        Priority:
+          1. The Odds API  (EuroLeague only — other leagues not in catalog)
+          2. football.com factsCenter API  (EuroLeague only — no auth required)
+          3. OddsPortal HTML fallback  (all leagues, best-effort)
         """
-        if self._api_key:
+        # -- 1. The Odds API (EuroLeague only) ----------------------------
+        if self._api_key and league == "euroleague":
             try:
                 records = await self._fetch_odds_api(league)
                 if records:
                     self._save_raw(records, league, source="the-odds-api")
                     return {r.game_id: r for r in records}
             except Exception as exc:
-                logger.warning("The Odds API failed ({}), falling back to OddsPortal", exc)
+                logger.warning("The Odds API failed ({}), trying football.com", exc)
 
+        # -- 2. football.com factsCenter (EuroLeague only) ----------------
+        if league == "euroleague":
+            try:
+                records = await self._fetch_footballcom(league)
+                if records:
+                    self._save_raw(records, league, source="football.com")
+                    return {r.game_id: r for r in records}
+            except Exception as exc:
+                logger.warning("football.com odds failed ({}), trying OddsPortal", exc)
+
+        # -- 3. OddsPortal HTML fallback ----------------------------------
         logger.info("Using OddsPortal fallback for league={}", league)
         records = await self._fetch_oddsportal(league)
-        self._save_raw(records, league, source="oddsportal")
+        if records:
+            self._save_raw(records, league, source="oddsportal")
         return {r.game_id: r for r in records}
 
     # ------------------------------------------------------------------
@@ -159,6 +195,113 @@ class OddsClient:
 
         records = _parse_odds_api_response(data, league)
         self._cache.set(cache_key, [r.to_dict() for r in records])
+        return records
+
+    # ------------------------------------------------------------------
+    # football.com factsCenter API (EuroLeague totals — no auth)
+    # ------------------------------------------------------------------
+    async def _fetch_footballcom(self, league: str) -> list[OddsRecord]:
+        """
+        Fetch EuroLeague totals from football.com factsCenter API.
+
+        Flow:
+          1. GET sportList → locate EuroLeague events (sr:tournament:138)
+          2. For each event, GET event?eventId=... → find market 18 (O/U total)
+          3. Match home/away team to canonical names via get_team_id
+        """
+        if league != "euroleague":
+            return []
+
+        cache_key = f"footballcom:{league}:{datetime.now(_TZ).date()}"
+        cached = self._cache.get(cache_key)
+        if cached:
+            return [OddsRecord(**r) for r in cached]
+
+        today = datetime.now(_TZ).date()
+        records: list[OddsRecord] = []
+
+        async with httpx.AsyncClient(headers=FOOTBALLCOM_HEADERS, timeout=20) as client:
+            # Step 1: get sport list to find EuroLeague event IDs
+            resp = await client.get(f"{FOOTBALLCOM_API}/sportList")
+            resp.raise_for_status()
+            sport_data = resp.json()
+
+            # Navigate: data (list of sports) → categories → tournaments
+            # NOTE: sportList returns tournament-level info only (no event IDs).
+            # This integration is currently a no-op; event IDs cannot be obtained
+            # from this endpoint. Falls through to OddsPortal silently.
+            el_event_ids: list[str] = []
+            for sport in sport_data.get("data") or []:
+                if sport.get("id") != "sr:sport:2":   # basketball
+                    continue
+                for cat in sport.get("categories") or []:
+                    for tourn in cat.get("tournaments") or []:
+                        if tourn.get("id") == FOOTBALLCOM_EL_TOURNAMENT:
+                            for evt in tourn.get("events") or []:
+                                eid = evt.get("id") or evt.get("eventId")
+                                if eid:
+                                    el_event_ids.append(str(eid))
+
+            if not el_event_ids:
+                logger.info("football.com: no EuroLeague events found in sportList")
+                return []
+
+            logger.info("football.com: {} EuroLeague events found", len(el_event_ids))
+
+            # Step 2: fetch each event's markets
+            for event_id in el_event_ids:
+                try:
+                    await asyncio.sleep(0.4)
+                    resp = await client.get(
+                        f"{FOOTBALLCOM_API}/event", params={"eventId": event_id}
+                    )
+                    resp.raise_for_status()
+                    evt = resp.json().get("data") or resp.json()
+
+                    home_raw = evt.get("homeTeamName") or ""
+                    away_raw = evt.get("awayTeamName") or ""
+                    commence_ts = evt.get("estimateStartTime") or evt.get("startTime") or 0
+
+                    if not home_raw or not away_raw:
+                        continue
+
+                    game_dt = datetime.fromtimestamp(commence_ts / 1000, tz=_TZ) if commence_ts > 1e9 else None
+                    game_date = game_dt.date() if game_dt else today
+                    if game_date != today:
+                        continue
+
+                    # Find market 18 (main Over/Under)
+                    book_total = 0.0
+                    for market in evt.get("markets") or []:
+                        if str(market.get("id")) == FOOTBALLCOM_TOTAL_MARKET_ID:
+                            for outcome in market.get("outcomes") or []:
+                                if outcome.get("name", "").lower() in ("over", "1"):
+                                    book_total = float(outcome.get("total") or outcome.get("hc") or 0)
+                                    break
+                            if book_total:
+                                break
+
+                    if not book_total:
+                        continue
+
+                    game_id = make_game_id(game_date, home_raw, away_raw)
+                    records.append(OddsRecord(
+                        game_id=game_id,
+                        league=league,
+                        match=f"{away_raw} @ {home_raw}",
+                        date=game_date.isoformat(),
+                        book_total=book_total,
+                        book_spread=0.0,
+                        odds_source="football.com",
+                        timestamp=_now_st_johns(),
+                    ))
+
+                except Exception as exc:
+                    logger.debug("football.com event {} parse error: {}", event_id, exc)
+
+        logger.info("football.com: {} EuroLeague odds records parsed", len(records))
+        if records:
+            self._cache.set(cache_key, [r.to_dict() for r in records])
         return records
 
     # ------------------------------------------------------------------

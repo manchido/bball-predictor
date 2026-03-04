@@ -85,7 +85,7 @@ def predict_today(
 
     async def _run() -> None:
         from src.models.ensemble import BballEnsemble
-        from src.scrapers.realgm import RealGMScraper
+        from src.scrapers.live_schedule import LiveScheduleFetcher
         from src.scrapers.odds import OddsClient
         from src.scrapers.injuries import InjuryScraper
         from src.injury.adjuster import InjuryAdjuster
@@ -103,7 +103,7 @@ def predict_today(
             typer.echo("ERROR: No trained model found. Run 'python cli.py train' first.", err=True)
             raise typer.Exit(1)
 
-        scraper = RealGMScraper()
+        scraper = LiveScheduleFetcher()
         odds_client = OddsClient()
         injury_scraper = InjuryScraper()
         gold_df = load_gold()
@@ -111,7 +111,7 @@ def predict_today(
 
         all_preds = []
         for league in active_leagues:
-            games = await scraper.fetch_today_schedule(league)
+            games = await scraper.fetch_today(league)
             if not games:
                 continue
             injury_data, odds_records = await asyncio.gather(
@@ -194,7 +194,7 @@ def backtest(
         typer.echo("No data in specified range.", err=True)
         raise typer.Exit(1)
 
-    X = subset[FEATURE_COLS].fillna(0).values.astype(np.float32)
+    X = subset.reindex(columns=FEATURE_COLS, fill_value=0).values.astype(np.float32)
     actuals = (subset["home_points"] + subset["away_points"]).values
     preds = ensemble.predict(X, game_ids=subset["game_id"].tolist())
 
@@ -239,16 +239,16 @@ def scrape_test(
     _init()
 
     async def _run() -> None:
-        from src.scrapers.realgm import RealGMScraper
+        from src.scrapers.live_schedule import LiveScheduleFetcher
         from src.scrapers.odds import OddsClient
         from src.scrapers.injuries import InjuryScraper
 
-        scraper = RealGMScraper()
+        scraper = LiveScheduleFetcher()
         odds_client = OddsClient()
         injury_scraper = InjuryScraper()
 
         typer.echo(f"Scraping {league} schedule...")
-        games = await scraper.fetch_today_schedule(league)
+        games = await scraper.fetch_today(league)
         typer.echo(f"  → {len(games)} games found")
         for g in games[:3]:
             typer.echo(f"     {g['date']} {g['away_team']} @ {g['home_team']}")
@@ -278,6 +278,52 @@ def build_gold(
     typer.echo("Building gold table...")
     df = build_gold_table(seasons=seasons)
     typer.echo(f"Gold table built: {len(df)} rows, {len(df.columns)} columns")
+
+
+# ---------------------------------------------------------------------------
+# refresh_data
+# ---------------------------------------------------------------------------
+
+@app.command()
+def refresh_data(
+    retrain: bool = typer.Option(False, "--retrain", help="Retrain model after refreshing data"),
+) -> None:
+    """Refresh silver data with the latest games from the current season, rebuild gold."""
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+
+    _init()
+    scripts_dir = _Path(__file__).parent / "scripts"
+
+    typer.echo("── EuroLeague + EuroCup ─────────────────────────────────")
+    subprocess.run(
+        [sys.executable, str(scripts_dir / "scrape_euroleague.py"),
+         "--competition", "E", "--competition", "U",
+         "--incremental", "--no-build-gold"],
+        check=True,
+    )
+
+    typer.echo("\n── ACB + BBL + BSL ──────────────────────────────────────")
+    subprocess.run(
+        [sys.executable, str(scripts_dir / "scrape_national_leagues.py"),
+         "--incremental", "--no-build-gold"],
+        check=True,
+    )
+
+    typer.echo("\n── Rebuilding gold feature table ────────────────────────")
+    from src.pipeline.silver_to_gold import build_gold_table
+    df = build_gold_table()
+    typer.echo(f"Gold table: {len(df)} rows, {len(df.columns)} columns")
+
+    if retrain:
+        typer.echo("\n── Retraining ensemble model ────────────────────────────")
+        from src.models.trainer import train as _train
+        metrics = _train()
+        for k, v in metrics.items():
+            typer.echo(f"  {k}: {v}")
+
+    typer.echo("\nDone.\n")
 
 
 # ---------------------------------------------------------------------------
