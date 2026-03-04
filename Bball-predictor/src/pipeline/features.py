@@ -210,6 +210,28 @@ def build_matchup_features(
     game_df = home_feat.merge(away_feat, on="game_id", how="inner")
     game_df["game_total"] = game_df["home_points"] + game_df["away_points"]
 
+    # Derived interaction features (no leakage — computed from already-shifted rolling cols)
+    for w in ("l5", "l10"):
+        h_off = f"home_off_rtg_{w}"
+        h_def = f"home_def_rtg_{w}"
+        a_off = f"away_off_rtg_{w}"
+        a_def = f"away_def_rtg_{w}"
+        if all(c in game_df.columns for c in [h_off, h_def, a_off, a_def]):
+            game_df[f"home_net_rtg_{w}"]           = game_df[h_off] - game_df[h_def]
+            game_df[f"away_net_rtg_{w}"]           = game_df[a_off] - game_df[a_def]
+            game_df[f"matchup_off_adv_{w}"]        = game_df[h_off] - game_df[a_def]   # home scoring edge
+            game_df[f"matchup_off_adv_away_{w}"]   = game_df[a_off] - game_df[h_def]   # away scoring edge
+
+    h_pace = "home_pace_per40_l5"
+    a_pace = "away_pace_per40_l5"
+    if h_pace in game_df.columns and a_pace in game_df.columns:
+        game_df["pace_sum_l5"] = game_df[h_pace] + game_df[a_pace]
+
+    if "home_days_rest" in game_df.columns:
+        game_df["home_btob"] = (game_df["home_days_rest"] <= 1).astype(int)
+    if "away_days_rest" in game_df.columns:
+        game_df["away_btob"] = (game_df["away_days_rest"] <= 1).astype(int)
+
     # Head-to-head
     h2h_df = build_h2h_features(
         team_game_df.drop_duplicates("game_id")[
@@ -261,9 +283,17 @@ FEATURE_COLS = [
     # Defense rolling
     "home_def_rtg_l5", "home_def_rtg_l10", "home_def_rtg_std",
     "away_def_rtg_l5", "away_def_rtg_l10", "away_def_rtg_std",
+    # Net rating (off - def) — team quality summary
+    "home_net_rtg_l5", "home_net_rtg_l10",
+    "away_net_rtg_l5", "away_net_rtg_l10",
+    # Matchup efficiency edge (home off vs away def, and vice versa)
+    "matchup_off_adv_l5", "matchup_off_adv_away_l5",
+    "matchup_off_adv_l10", "matchup_off_adv_away_l10",
     # Pace
     "home_pace_per40_l5", "home_pace_per40_l10", "home_pace_per40_std",
     "away_pace_per40_l5", "away_pace_per40_l10", "away_pace_per40_std",
+    # Combined pace (possessions proxy → expected scoring)
+    "pace_sum_l5",
     # Points scored
     "home_points_l5", "home_points_l10", "home_points_std",
     "away_points_l5", "away_points_l10", "away_points_std",
@@ -273,10 +303,10 @@ FEATURE_COLS = [
     # Rest + travel
     "home_days_rest", "away_days_rest",
     "home_cons_away", "away_cons_away",
+    # Back-to-back flag (days_rest <= 1)
+    "home_btob", "away_btob",
     # H2H
     "h2h_total_l3",
-    # Injury
-    "home_top3_avail", "away_top3_avail",
     # Context
     "league_id", "week_of_season",
 ]
