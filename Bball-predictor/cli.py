@@ -133,18 +133,21 @@ def predict_today(
         if output_json:
             typer.echo(json.dumps([p.model_dump() for p in all_preds], indent=2, default=str))
         else:
-            typer.echo(f"\n── Today's Predictions ({date.today()}) ──────────────────────")
+            typer.echo(f"\n── Today's Predictions ({date.today()}) ──────────────────────────────────────────")
             for p in all_preds:
                 edge_str = f"  edge={p.edge:+.1f}" if p.edge is not None else ""
-                line_str = f"  line={p.book_total}" if p.book_total else "  (no line)"
+                line_str = f"  line={p.book_total:.1f}" if p.book_total else "  (no line)  "
+                # Split: away score / home score  (match string is "away @ home")
+                split_str = f"  {p.model_away_mean:.1f} @ {p.model_home_mean:.1f}"
                 typer.echo(
-                    f"  [{p.league.upper():12s}] {p.match:40s}"
-                    f"  model={p.model_total_mean:.1f}"
-                    f"  [{p.model_total_p10:.1f}–{p.model_total_p90:.1f}]"
+                    f"  [{p.league.upper():12s}] {p.match:42s}"
+                    f"  total={p.model_total_mean:.1f}"
+                    f"  [{p.model_total_p10:.0f}–{p.model_total_p90:.0f}]"
+                    f"{split_str}"
                     f"{line_str}{edge_str}"
                 )
-            typer.echo(f"─────────────────────────────────────────────────────")
-            typer.echo(f"  {len(all_preds)} games predicted\n")
+            typer.echo(f"──────────────────────────────────────────────────────────────────────────────────")
+            typer.echo(f"  {len(all_preds)} games predicted  (split shown as: away @ home)\n")
 
     asyncio.run(_run())
 

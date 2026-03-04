@@ -70,12 +70,13 @@ async def predict_today(
     injury_scraper = InjuryScraper()
     odds_client = OddsClient()
 
+    gold_df = load_gold()
     all_predictions: list[PredictionResponse] = []
 
     for league in active_leagues:
         try:
             # 1. Schedule
-            games = await scraper.fetch_today_schedule(league)
+            games = await scraper.fetch_today(league)
             if not games:
                 logger.info("No games today for league={}", league)
                 continue
@@ -86,8 +87,7 @@ async def predict_today(
                 odds_client.fetch_today_odds(league),
             )
 
-            # 3. Build features from gold table (season-to-date rolling context)
-            gold_df = load_gold()
+            # 3. Use gold table loaded once above
             if gold_df.empty:
                 warnings.append(f"Gold table empty — predictions for {league} may be inaccurate")
                 continue

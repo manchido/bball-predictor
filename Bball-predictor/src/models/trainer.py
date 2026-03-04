@@ -36,9 +36,9 @@ from src.utils.config import settings
 from src.utils.logging import logger
 
 
-TRAIN_SEASONS = ["2023-24", "2024"]    # adapt to your data season naming
-VAL_SEASONS   = ["2024-25", "2025"]
-TEST_SEASONS  = ["2025-26", "2026"]
+TRAIN_SEASONS = ["2023-24", "2024", "2024-25", "2025"]  # both complete historical seasons
+VAL_SEASONS   = ["2025-26", "2026"]   # current season: meta-model + calibration
+TEST_SEASONS  = ["2025-26", "2026"]   # same as val — no separate holdout during live season
 
 
 def _prepare_xy(
