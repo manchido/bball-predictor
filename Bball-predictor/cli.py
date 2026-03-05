@@ -278,9 +278,16 @@ def build_gold(
     """(Re)build the gold feature table from silver data."""
     _init()
     from src.pipeline.silver_to_gold import build_gold_table
+    from pathlib import Path
     typer.echo("Building gold table...")
     df = build_gold_table(seasons=seasons)
     typer.echo(f"Gold table built: {len(df)} rows, {len(df.columns)} columns")
+    # Apply OddsPortal fuzzy odds matching if silver odds exist
+    silver_dir = Path(settings.data_dir) / "silver"
+    gold_path = Path(settings.data_dir) / "gold" / "features.parquet"
+    if (silver_dir / "odds.parquet").exists() and gold_path.exists():
+        from scripts.scrape_odds_oddsportal import patch_gold_with_alt_ids
+        patch_gold_with_alt_ids(silver_dir, gold_path)
 
 
 # ---------------------------------------------------------------------------
