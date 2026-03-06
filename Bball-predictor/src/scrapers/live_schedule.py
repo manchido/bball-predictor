@@ -146,10 +146,37 @@ class LiveScheduleFetcher:
         return results
 
     # ------------------------------------------------------------------
-    # SofaScore (BBL / BSL)
+    # SofaScore (BBL / BSL / NBA / LKL / KORIS / NBL_CZ / ABA / CBA / HUNG)
     # ------------------------------------------------------------------
     async def _fetch_sf_today(self, league: str, today: date) -> list[dict]:
+        """
+        Use the date-based scheduled-events endpoint so we catch games that
+        have already started (live) or finished today, not just upcoming ones.
+        Falls back to the per-season /events/next paginator if the date
+        endpoint returns 404 (older SofaScore API versions).
+        """
         t_id, s_id, season_label = _SF_CURRENT[league]
+        date_url = f"{SF_BASE}/sport/basketball/scheduled-events/{today.isoformat()}"
+
+        async with httpx.AsyncClient(headers=HEADERS_SF, timeout=20) as c:
+            try:
+                data = await _get_json(c, date_url)
+                events = data.get("events", [])
+                results = [
+                    _build_game_dict(today, e["homeTeam"]["name"], e["awayTeam"]["name"], league, season_label)
+                    for e in events
+                    if e.get("tournament", {}).get("uniqueTournament", {}).get("id") == t_id
+                    and e.get("homeTeam", {}).get("name")
+                    and e.get("awayTeam", {}).get("name")
+                ]
+                logger.info("LiveScheduleFetcher [{}]: {} games today (date endpoint)", league, len(results))
+                return results
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 404:
+                    raise
+                # Fall through to paginator if date endpoint unavailable
+
+        # Fallback: paginate /events/next (misses already-started games)
         today_start = int(datetime.combine(today, datetime.min.time(), tzinfo=_UTC).timestamp())
         today_end   = today_start + 86_400
 
@@ -167,14 +194,14 @@ class LiveScheduleFetcher:
                 if not events:
                     break
 
-                for e in events:
-                    ts = e.get("startTimestamp", 0)
+                for ev in events:
+                    ts = ev.get("startTimestamp", 0)
                     if ts >= today_end:
-                        # All remaining events are in the future — stop paging
+                        logger.info("LiveScheduleFetcher [{}]: {} games today (fallback paginator)", league, len(results))
                         return results
                     if today_start <= ts < today_end:
-                        home_raw = e.get("homeTeam", {}).get("name", "")
-                        away_raw = e.get("awayTeam", {}).get("name", "")
+                        home_raw = ev.get("homeTeam", {}).get("name", "")
+                        away_raw = ev.get("awayTeam", {}).get("name", "")
                         if home_raw and away_raw:
                             results.append(
                                 _build_game_dict(today, home_raw, away_raw, league, season_label)
@@ -182,7 +209,7 @@ class LiveScheduleFetcher:
 
                 await asyncio.sleep(0.5)
 
-        logger.info("LiveScheduleFetcher [{}]: {} games today", league, len(results))
+        logger.info("LiveScheduleFetcher [{}]: {} games today (fallback paginator)", league, len(results))
         return results
 
     # ------------------------------------------------------------------
