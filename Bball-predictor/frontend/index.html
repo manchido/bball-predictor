@@ -93,31 +93,33 @@ const LEAGUE_META = {
   hung:       { name: 'Hungary',      color: '#84CC16' },
 };
 
-// Pace thresholds: possessions per 40 player-minutes (from training data analysis)
-const PACE_GRADES = [
-  { max: 6.5,      label: 'Very Slow', emoji: '🐢', color: '#6B7280' },
-  { max: 7.3,      label: 'Slow',      emoji: '🚶', color: '#60A5FA' },
-  { max: 7.8,      label: 'Medium',    emoji: '🏃', color: '#34D399' },
-  { max: 8.8,      label: 'Fast',      emoji: '⚡', color: '#FBBF24' },
-  { max: Infinity, label: 'Very Fast', emoji: '🚀', color: '#FB923C' },
-];
+// Scoring form grade — relative to the model's prediction for that team side
+// pct = team_pts_l5 / model_side_pred
+// > 1.06 → scoring above what model expects → "Hot"
+// < 0.94 → scoring below                   → "Cold"
+// otherwise                                 → "On Track"
+function scoringFormGrade(ptsL5, modelPred) {
+  if (!ptsL5 || !modelPred) return null;
+  const ratio = ptsL5 / modelPred;
+  if (ratio >= 1.06) return { label: 'Hot 🔥',      color: '#F97316', bg: '#431407' };
+  if (ratio <= 0.94) return { label: 'Cold ❄️',      color: '#60A5FA', bg: '#172554' };
+  return                     { label: 'On Track ✓',  color: '#34D399', bg: '#052e16' };
+}
 
-const PACE_MIN = 4.0;
-const PACE_MAX = 13.0;
+// Defensive form grade — relative to the model's prediction for the opponent side
+// ptsAllowed vs opponent's model prediction: if you allow less than expected → Stingy
+function defFormGrade(ptsAllowedL5, oppModelPred) {
+  if (!ptsAllowedL5 || !oppModelPred) return null;
+  const ratio = ptsAllowedL5 / oppModelPred;
+  if (ratio <= 0.94) return { label: 'Stingy 🔒', color: '#34D399', bg: '#052e16' };
+  if (ratio >= 1.06) return { label: 'Leaky 🚨',  color: '#F87171', bg: '#450a0a' };
+  return                     { label: 'Average',   color: '#9CA3AF', bg: '#111827' };
+}
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
 const leagueColor = (lg) => LEAGUE_META[lg]?.color ?? '#6B7280';
 const leagueName  = (lg) => LEAGUE_META[lg]?.name  ?? lg.toUpperCase();
-
-function gradePace(pace) {
-  if (!pace || pace <= 0) return { label: 'N/A', emoji: '—', color: '#4B5563' };
-  return PACE_GRADES.find(g => pace < g.max) ?? PACE_GRADES[PACE_GRADES.length - 1];
-}
-
-function paceBarPct(pace) {
-  return Math.min(100, Math.max(4, ((pace - PACE_MIN) / (PACE_MAX - PACE_MIN)) * 100));
-}
 
 function confidenceColor(c) {
   if (c > 0.65) return '#34D399';
@@ -149,36 +151,51 @@ function barContext(game) {
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-function PaceRow({ pace, side }) {
-  if (!pace) return <div className="mt-2 text-[9px] text-gray-700">pace n/a</div>;
-  const grade = gradePace(pace);
-  const pct   = paceBarPct(pace);
-  const isHome = side === 'home';
+// ScoringForm: replaces pace — shows L5 scoring avg + form grade relative to model prediction
+function ScoringForm({ ptsL5, ptsAllowedL5, modelSidePred, oppModelPred, side }) {
+  const isHome   = side === 'home';
+  const offGrade = scoringFormGrade(ptsL5, modelSidePred);
+  const defGrade = defFormGrade(ptsAllowedL5, oppModelPred);
+
+  if (!ptsL5 && !ptsAllowedL5) {
+    return <div className="mt-2 text-[9px] text-gray-700">no form data</div>;
+  }
 
   return (
-    <div className={`mt-2.5 ${isHome ? 'text-right' : ''}`}>
-      <div className={`flex items-center gap-1.5 mb-1 ${isHome ? 'justify-end' : ''}`}>
-        {isHome && (
-          <span className="text-[10px] font-bold" style={{ color: grade.color }}>
-            {grade.label}
-          </span>
-        )}
-        <span className="text-sm leading-none">{grade.emoji}</span>
-        {!isHome && (
-          <span className="text-[10px] font-bold" style={{ color: grade.color }}>
-            {grade.label}
-          </span>
-        )}
-      </div>
-      <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full pace-fill ${isHome ? 'ml-auto' : ''}`}
-          style={{ width: `${pct}%`, background: grade.color }}
-        />
-      </div>
-      <div className={`text-[9px] text-gray-600 mt-0.5 tabular-nums`}>
-        {pace.toFixed(1)} poss/40
-      </div>
+    <div className={`mt-2.5 space-y-1.5 ${isHome ? 'text-right' : ''}`}>
+
+      {/* Offense row */}
+      {ptsL5 && (
+        <div className={`flex items-center gap-1.5 ${isHome ? 'justify-end' : ''}`}>
+          <span className="text-[9px] text-gray-500">Scores</span>
+          <span className="text-[11px] font-bold text-gray-200 tabular-nums">{ptsL5.toFixed(1)}</span>
+          {offGrade && (
+            <span
+              className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
+              style={{ color: offGrade.color, background: offGrade.bg }}
+            >
+              {offGrade.label}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Defense row */}
+      {ptsAllowedL5 && (
+        <div className={`flex items-center gap-1.5 ${isHome ? 'justify-end' : ''}`}>
+          <span className="text-[9px] text-gray-500">Allows</span>
+          <span className="text-[11px] font-bold text-gray-200 tabular-nums">{ptsAllowedL5.toFixed(1)}</span>
+          {defGrade && (
+            <span
+              className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
+              style={{ color: defGrade.color, background: defGrade.bg }}
+            >
+              {defGrade.label}
+            </span>
+          )}
+        </div>
+      )}
+
     </div>
   );
 }
@@ -231,7 +248,13 @@ function GameCard({ game, league, index }) {
             <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
               {game.model_away_mean.toFixed(1)}
             </div>
-            <PaceRow pace={game.away_pace} side="away" />
+            <ScoringForm
+              ptsL5={game.away_pts_l5}
+              ptsAllowedL5={game.away_pts_allowed_l5}
+              modelSidePred={game.model_away_mean}
+              oppModelPred={game.model_home_mean}
+              side="away"
+            />
           </div>
 
           {/* VS divider */}
@@ -249,7 +272,13 @@ function GameCard({ game, league, index }) {
             <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
               {game.model_home_mean.toFixed(1)}
             </div>
-            <PaceRow pace={game.home_pace} side="home" />
+            <ScoringForm
+              ptsL5={game.home_pts_l5}
+              ptsAllowedL5={game.home_pts_allowed_l5}
+              modelSidePred={game.model_home_mean}
+              oppModelPred={game.model_away_mean}
+              side="home"
+            />
           </div>
 
         </div>

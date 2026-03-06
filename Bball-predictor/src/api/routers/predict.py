@@ -204,12 +204,20 @@ def _predict_games(
         odds_source = odds.odds_source if odds else None
         edge = round(p.total_mean - book_total, 2) if book_total else None
 
-        # Pace (possessions per 40 min, rolling L5)
         import math
-        _hp = feature_row.get("home_pace_per40_l5")
-        _ap = feature_row.get("away_pace_per40_l5")
-        home_pace = round(_hp, 2) if _hp and not math.isnan(_hp) and _hp > 0 else None
-        away_pace = round(_ap, 2) if _ap and not math.isnan(_ap) and _ap > 0 else None
+
+        def _safe(val, digits=1):
+            return round(val, digits) if val and not math.isnan(val) and val > 0 else None
+
+        # Pace (kept in model, passed through for completeness)
+        home_pace = _safe(feature_row.get("home_pace_per40_l5"), 2)
+        away_pace = _safe(feature_row.get("away_pace_per40_l5"), 2)
+
+        # Rolling scoring form (L5 avg) — what actually drives the total
+        home_pts_l5         = _safe(feature_row.get("home_points_l5"))
+        away_pts_l5         = _safe(feature_row.get("away_points_l5"))
+        home_pts_allowed_l5 = _safe(feature_row.get("home_opp_points_l5"))
+        away_pts_allowed_l5 = _safe(feature_row.get("away_opp_points_l5"))
 
         match_str = f"{game['away_team']} @ {game['home_team']}"
         pred_resp = PredictionResponse(
@@ -231,6 +239,10 @@ def _predict_games(
             timestamp=now,
             home_pace=home_pace,
             away_pace=away_pace,
+            home_pts_l5=home_pts_l5,
+            away_pts_l5=away_pts_l5,
+            home_pts_allowed_l5=home_pts_allowed_l5,
+            away_pts_allowed_l5=away_pts_allowed_l5,
         )
         predictions.append(pred_resp)
 

@@ -29,8 +29,12 @@ class PredictionResponse(BaseModel):
     edge: Optional[float] = None          # model_mean - book_total (None if no line)
     odds_source: Optional[str] = None
     timestamp: datetime
-    home_pace: Optional[float] = None     # home team pace_per40 (rolling L5)
-    away_pace: Optional[float] = None     # away team pace_per40 (rolling L5)
+    home_pace: Optional[float] = None          # home team pace_per40 (rolling L5) — kept for model use
+    away_pace: Optional[float] = None          # away team pace_per40 (rolling L5)
+    home_pts_l5: Optional[float] = None        # home team avg points scored last 5 games
+    away_pts_l5: Optional[float] = None        # away team avg points scored last 5 games
+    home_pts_allowed_l5: Optional[float] = None  # home team avg points allowed last 5 games
+    away_pts_allowed_l5: Optional[float] = None  # away team avg points allowed last 5 games
 
 
 class TodayPredictionsResponse(BaseModel):
