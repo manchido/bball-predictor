@@ -51,77 +51,98 @@ def _get_ensemble():
     return _ensemble
 
 
+_LEAGUE_TIMEOUT = 20  # seconds per league before giving up
+
+
+async def _process_league(
+    league: str,
+    scraper: LiveScheduleFetcher,
+    injury_scraper: InjuryScraper,
+    odds_client: OddsClient,
+    ensemble,
+    gold_df,
+    adjuster: InjuryAdjuster,
+    now: datetime,
+) -> tuple[list[PredictionResponse], list[str]]:
+    """Fetch + predict for one league. Returns (predictions, warnings)."""
+    try:
+        games = await scraper.fetch_today(league)
+        if not games:
+            logger.info("No games today for league={}", league)
+            return [], []
+
+        injury_data, odds_records = await asyncio.gather(
+            injury_scraper.fetch_today(league),
+            odds_client.fetch_today_odds(league),
+        )
+
+        predictions = _predict_games(
+            ensemble=ensemble,
+            games=games,
+            gold_df=gold_df,
+            odds_records=odds_records,
+            injury_data=injury_data,
+            adjuster=adjuster,
+            league=league,
+            now=now,
+        )
+        return predictions, []
+
+    except Exception as exc:
+        logger.warning("Prediction skipped for league={}: {}", league, exc)
+        return [], [f"{league}: {type(exc).__name__}"]
+
+
 @router.get("/today", response_model=TodayPredictionsResponse)
 async def predict_today(
     leagues: Optional[list[str]] = Query(default=None),
 ) -> TodayPredictionsResponse:
     """
-    Full daily prediction pipeline:
-    1. Scrape today's schedule + injuries
-    2. Fetch bookmaker odds
-    3. Build features
-    4. Predict with calibrated ensemble
-    5. Return structured predictions
+    Full daily prediction pipeline — all leagues run concurrently.
+    Each league is capped at 20 s; failures are skipped with a warning.
     """
     ensemble = _get_ensemble()
     active_leagues = leagues or LEAGUES
     today = date.today()
     now = datetime.now(_TZ)
-    warnings: list[str] = []
 
-    scraper = LiveScheduleFetcher()
+    scraper       = LiveScheduleFetcher()
     injury_scraper = InjuryScraper()
-    odds_client = OddsClient()
+    odds_client   = OddsClient()
+    gold_df       = load_gold()
+    adjuster      = InjuryAdjuster.from_silver()  # load once, share across leagues
 
-    gold_df = load_gold()
-    all_predictions: list[PredictionResponse] = []
+    if gold_df.empty:
+        return TodayPredictionsResponse(
+            date=today, leagues=active_leagues, games=[],
+            model_loaded=True, warnings=["Gold table empty — run build-gold first"],
+        )
 
-    for league in active_leagues:
+    async def _with_timeout(league: str):
         try:
-            # 1. Schedule
-            games = await scraper.fetch_today(league)
-            if not games:
-                logger.info("No games today for league={}", league)
-                continue
-
-            # 2. Injuries + Odds (parallel)
-            injury_data, odds_records = await asyncio.gather(
-                injury_scraper.fetch_today(league),
-                odds_client.fetch_today_odds(league),
+            return await asyncio.wait_for(
+                _process_league(league, scraper, injury_scraper, odds_client,
+                                ensemble, gold_df, adjuster, now),
+                timeout=_LEAGUE_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.warning("League {} timed out after {}s", league, _LEAGUE_TIMEOUT)
+            return [], [f"{league}: timed out"]
 
-            # 3. Use gold table loaded once above
-            if gold_df.empty:
-                warnings.append(f"Gold table empty — predictions for {league} may be inaccurate")
-                continue
+    results = await asyncio.gather(*[_with_timeout(lg) for lg in active_leagues])
 
-            # Filter to recent data for rolling context, then append today's games
-            game_ids_today = [g["game_id"] for g in games]
-
-            # Build feature rows for today's matchups
-            adjuster = InjuryAdjuster.from_silver()
-            predictions = _predict_games(
-                ensemble=ensemble,
-                games=games,
-                gold_df=gold_df,
-                odds_records=odds_records,
-                injury_data=injury_data,
-                adjuster=adjuster,
-                league=league,
-                now=now,
-            )
-            all_predictions.extend(predictions)
-
-        except Exception as exc:
-            logger.exception("Prediction failed for league={}", league)
-            warnings.append(f"Error predicting {league}: {exc}")
+    all_predictions: list[PredictionResponse] = []
+    all_warnings: list[str] = []
+    for preds, warns in results:
+        all_predictions.extend(preds)
+        all_warnings.extend(warns)
 
     return TodayPredictionsResponse(
         date=today,
         leagues=active_leagues,
         games=all_predictions,
         model_loaded=True,
-        warnings=warnings,
+        warnings=all_warnings,
     )
 
 

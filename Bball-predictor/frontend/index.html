@@ -497,7 +497,7 @@ function App() {
     setPredictions([]);
 
     const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 90_000); // 90s max
+    const timeout    = setTimeout(() => controller.abort(), 45_000); // 45s (leagues run in parallel)
 
     try {
       const params = selectedLeagues.length > 0
@@ -521,7 +521,7 @@ function App() {
     } catch (e) {
       clearTimeout(timeout);
       if (e.name === 'AbortError') {
-        setError('Request timed out after 90 seconds. Make sure the prediction server is running (uvicorn src.api.main:app).');
+        setError('Request timed out. Make sure the prediction server is running: uvicorn src.api.main:app --port 8080');
       } else {
         setError(e.message);
       }
