@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
-from src.api.schemas import PredictionResponse, TodayPredictionsResponse
+from src.api.schemas import ManualPredictRequest, PredictionResponse, TodayPredictionsResponse
 from src.scrapers.injuries import InjuryScraper
 from src.scrapers.live_schedule import LiveScheduleFetcher
 from src.scrapers.odds import OddsClient
@@ -144,6 +144,63 @@ async def predict_today(
         model_loaded=True,
         warnings=all_warnings,
     )
+
+
+@router.post("/game", response_model=PredictionResponse)
+async def predict_game(req: ManualPredictRequest) -> PredictionResponse:
+    """
+    Predict a single manually-specified matchup without needing a live schedule.
+    Useful when the schedule scraper is down or for ad-hoc predictions.
+    """
+    from src.utils.ids import make_game_id, get_team_id
+
+    ensemble = _get_ensemble()
+    gold_df = load_gold()
+    if gold_df.empty:
+        raise HTTPException(status_code=503, detail="Gold table empty — run build-gold first")
+
+    adjuster = InjuryAdjuster.from_silver()
+    now = datetime.now(_TZ)
+    game_date = req.date or date.today()
+
+    season_year = game_date.year
+    season = (
+        f"{season_year}-{str(season_year + 1)[-2:]}"
+        if game_date.month >= 10
+        else f"{season_year - 1}-{str(season_year)[-2:]}"
+    )
+
+    game = {
+        "game_id":      make_game_id(game_date, req.home_team, req.away_team),
+        "date":         game_date.isoformat(),
+        "home_team":    req.home_team,
+        "away_team":    req.away_team,
+        "home_team_id": get_team_id(req.home_team),
+        "away_team_id": get_team_id(req.away_team),
+        "league":       req.league,
+        "season":       season,
+        "status":       "manual",
+    }
+
+    preds = _predict_games(
+        ensemble=ensemble,
+        games=[game],
+        gold_df=gold_df,
+        odds_records={},
+        injury_data={},
+        adjuster=adjuster,
+        league=req.league,
+        now=now,
+    )
+
+    if not preds:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No historical data found for '{req.home_team}' or '{req.away_team}' in {req.league}. "
+                   "Check team names match what's in the gold table.",
+        )
+
+    return preds[0]
 
 
 @router.get("/{game_id}", response_model=PredictionResponse)

@@ -445,6 +445,148 @@ function LeagueAccordion({ league, games, isOpen, onToggle }) {
   );
 }
 
+// ── Manual Prediction Form ────────────────────────────────────────────────────
+
+function ManualPredictForm() {
+  const [league,  setLeague]  = useState('euroleague');
+  const [home,    setHome]    = useState('');
+  const [away,    setAway]    = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState(null);
+  const [result,  setResult]  = useState(null);
+
+  const canSubmit = home.trim() && away.trim() && !loading;
+
+  const submit = useCallback(async () => {
+    if (!canSubmit) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await fetch('/predict/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ league, home_team: home.trim(), away_team: away.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
+      setResult(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [league, home, away, canSubmit]);
+
+  const inputCls = "w-full bg-[#0a1520] border border-[#1e2d3d] rounded-xl px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600 transition-colors";
+
+  return (
+    <div
+      className="rounded-2xl overflow-hidden mt-6"
+      style={{ border: '1px solid #1e2d3d', background: 'linear-gradient(160deg, #0b1622 0%, #0f1e2e 100%)' }}
+    >
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-[#1e2d3d] flex items-center gap-2.5">
+        <span className="text-base">🎯</span>
+        <div>
+          <p className="text-sm font-black text-white tracking-tight">Manual Prediction</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">Enter any matchup directly — bypasses schedule scraper</p>
+        </div>
+      </div>
+
+      {/* Form */}
+      <div className="px-5 py-5">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+
+          {/* League */}
+          <div>
+            <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">League</label>
+            <select
+              value={league}
+              onChange={e => setLeague(e.target.value)}
+              className={inputCls + ' cursor-pointer'}
+              style={{ appearance: 'none' }}
+            >
+              {ALL_LEAGUES.map(lg => (
+                <option key={lg} value={lg}>{leagueName(lg)}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Away team */}
+          <div>
+            <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">Away Team</label>
+            <input
+              type="text"
+              value={away}
+              onChange={e => setAway(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submit()}
+              placeholder="e.g. Real Madrid"
+              className={inputCls}
+            />
+          </div>
+
+          {/* Home team */}
+          <div>
+            <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">Home Team</label>
+            <input
+              type="text"
+              value={home}
+              onChange={e => setHome(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submit()}
+              placeholder="e.g. FC Barcelona"
+              className={inputCls}
+            />
+          </div>
+
+          {/* Submit */}
+          <div>
+            <button
+              onClick={submit}
+              disabled={!canSubmit}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                background: canSubmit
+                  ? 'linear-gradient(135deg, #1d4ed8 0%, #6d28d9 100%)'
+                  : '#1e2d3d',
+                boxShadow: canSubmit ? '0 4px 16px rgba(37,99,235,0.3)' : 'none',
+              }}
+            >
+              {loading ? <span className="spinner" /> : <span>🔮</span>}
+              {loading ? 'Predicting…' : 'Predict'}
+            </button>
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="mt-4 bg-red-950 border border-red-800 rounded-xl p-3 flex items-start gap-2">
+            <span>⚠️</span>
+            <div>
+              <p className="font-semibold text-red-300 text-xs">Prediction failed</p>
+              <p className="text-red-400 text-[11px] mt-0.5">{error}</p>
+              <p className="text-gray-600 text-[10px] mt-1.5">
+                Tip: team names must match what's in the gold table exactly.
+                Run <code className="bg-gray-900 px-1 rounded">python cli.py list-teams --league {league}</code> to see valid names.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Result card */}
+        {result && (
+          <div className="mt-5">
+            <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-3">Result</p>
+            <div className="max-w-sm">
+              <GameCard game={result} league={result.league} index={0} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ─────────────────────────────────────────────────────────────────
 
 function App() {
@@ -665,6 +807,9 @@ function App() {
           ))}
         </div>
       )}
+
+      {/* ── Manual prediction form ── */}
+      <ManualPredictForm />
 
       {/* ── Footer ── */}
       <footer className="mt-16 pt-6 border-t border-gray-900 flex items-center justify-between text-[11px] text-gray-700">

@@ -46,6 +46,17 @@ class TodayPredictionsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Manual prediction
+# ---------------------------------------------------------------------------
+
+class ManualPredictRequest(BaseModel):
+    league: str
+    home_team: str
+    away_team: str
+    date: Optional[date] = None   # defaults to today if omitted
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 

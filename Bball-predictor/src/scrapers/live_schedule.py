@@ -29,9 +29,10 @@ from src.utils.logging import logger
 
 _UTC = ZoneInfo("UTC")
 
-EL_BASE = "https://api-live.euroleague.net/v2"
-SF_BASE = "https://api.sofascore.com/api/v1"
+EL_BASE  = "https://api-live.euroleague.net/v2"
+SF_BASE  = "https://api.sofascore.com/api/v1"
 ACB_BASE = "https://www.acb.com"
+ESPN_NBA = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 
 HEADERS_EL = {
     "Accept": "application/json",
@@ -51,6 +52,10 @@ HEADERS_ACB = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+}
+HEADERS_ESPN = {
+    "User-Agent": "BballPredictor/1.0 (research)",
+    "Accept": "application/json",
 }
 
 # Current season codes — update each October
@@ -109,7 +114,13 @@ class LiveScheduleFetcher:
             if league == "acb":
                 return await self._fetch_acb_today(today)
         except Exception:
-            logger.exception("LiveScheduleFetcher failed for league={}", league)
+            logger.warning("LiveScheduleFetcher primary source failed for league={}, trying fallbacks", league)
+            # ESPN fallback for NBA when SofaScore is rate-limited
+            if league == "nba":
+                try:
+                    return await self._fetch_espn_nba_today(today)
+                except Exception:
+                    logger.exception("ESPN NBA fallback also failed")
         return []
 
     # ------------------------------------------------------------------
@@ -210,6 +221,30 @@ class LiveScheduleFetcher:
                 await asyncio.sleep(0.5)
 
         logger.info("LiveScheduleFetcher [{}]: {} games today (fallback paginator)", league, len(results))
+        return results
+
+    # ------------------------------------------------------------------
+    # ESPN (NBA fallback when SofaScore is rate-limited)
+    # ------------------------------------------------------------------
+    async def _fetch_espn_nba_today(self, today: date) -> list[dict]:
+        """Fetch today's NBA games from ESPN's public scoreboard API (no auth needed)."""
+        season_label = "2025-26"
+        async with httpx.AsyncClient(headers=HEADERS_ESPN, timeout=15) as c:
+            data = await _get_json(c, ESPN_NBA, params={"dates": today.strftime("%Y%m%d")})
+
+        results: list[dict] = []
+        for ev in data.get("events", []):
+            for comp in ev.get("competitions", []):
+                competitors = comp.get("competitors", [])
+                home = next((t for t in competitors if t.get("homeAway") == "home"), None)
+                away = next((t for t in competitors if t.get("homeAway") == "away"), None)
+                if home and away:
+                    home_name = home.get("team", {}).get("displayName", "")
+                    away_name = away.get("team", {}).get("displayName", "")
+                    if home_name and away_name:
+                        results.append(_build_game_dict(today, home_name, away_name, "nba", season_label))
+
+        logger.info("LiveScheduleFetcher [nba/ESPN fallback]: {} games today", len(results))
         return results
 
     # ------------------------------------------------------------------

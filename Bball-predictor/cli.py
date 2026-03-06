@@ -156,6 +156,126 @@ def predict_today(
 
 
 # ---------------------------------------------------------------------------
+# predict_game  (manual matchup — no schedule scraper needed)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def predict_game(
+    league: str = typer.Argument(..., help="League code e.g. nba, bbl, euroleague"),
+    home: str = typer.Option(..., "--home", help="Home team name (as it appears in gold table)"),
+    away: str = typer.Option(..., "--away", help="Away team name"),
+) -> None:
+    """Predict a single manually-specified matchup (bypasses live schedule fetch)."""
+    _init()
+
+    async def _run() -> None:
+        from src.models.ensemble import BballEnsemble
+        from src.pipeline.silver_to_gold import load_gold
+        from src.injury.adjuster import InjuryAdjuster
+        from src.api.routers.predict import _predict_games
+        from src.utils.ids import make_game_id, get_team_id
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        _TZ = ZoneInfo(settings.timezone)
+        now = datetime.now(_TZ)
+        today = date.today()
+
+        try:
+            ensemble = BballEnsemble.load()
+        except FileNotFoundError:
+            typer.echo("ERROR: No trained model found. Run 'python cli.py train' first.", err=True)
+            raise typer.Exit(1)
+
+        gold_df = load_gold()
+        if gold_df.empty:
+            typer.echo("ERROR: Gold table empty.", err=True)
+            raise typer.Exit(1)
+
+        adjuster = InjuryAdjuster.from_silver()
+
+        season = (
+            f"{today.year}-{str(today.year + 1)[-2:]}"
+            if today.month >= 10
+            else f"{today.year - 1}-{str(today.year)[-2:]}"
+        )
+        game = {
+            "game_id":      make_game_id(today, home, away),
+            "date":         today.isoformat(),
+            "home_team":    home,
+            "away_team":    away,
+            "home_team_id": get_team_id(home),
+            "away_team_id": get_team_id(away),
+            "league":       league,
+            "season":       season,
+            "status":       "manual",
+        }
+
+        preds = _predict_games(
+            ensemble=ensemble,
+            games=[game],
+            gold_df=gold_df,
+            odds_records={},
+            injury_data={},
+            adjuster=adjuster,
+            league=league,
+            now=now,
+        )
+
+        if not preds:
+            typer.echo(
+                f"ERROR: No historical data found for '{home}' or '{away}' in {league}.\n"
+                f"Tip: check exact names with: python cli.py list-teams --league {league}",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        p = preds[0]
+        typer.echo(f"\n── Manual Prediction ─────────────────────────────────────────────")
+        typer.echo(f"  [{league.upper():12s}]  {p.match}")
+        typer.echo(f"  Total:      {p.model_total_mean:.1f}  [{p.model_total_p10:.0f}–{p.model_total_p90:.0f}]")
+        typer.echo(f"  Split:      {p.model_away_mean:.1f} @ {p.model_home_mean:.1f}  (away @ home)")
+        typer.echo(f"  Confidence: {p.confidence:.1%}")
+        if p.home_pts_l5:
+            typer.echo(f"  Home L5:    scores {p.home_pts_l5:.1f},  allows {p.home_pts_allowed_l5:.1f}")
+        if p.away_pts_l5:
+            typer.echo(f"  Away L5:    scores {p.away_pts_l5:.1f},  allows {p.away_pts_allowed_l5:.1f}")
+        typer.echo(f"─────────────────────────────────────────────────────────────────\n")
+
+    asyncio.run(_run())
+
+
+@app.command()
+def list_teams(
+    league: str = typer.Option(..., "--league", help="League code"),
+) -> None:
+    """List all team names available in the gold table for a given league."""
+    _init()
+    from src.pipeline.silver_to_gold import load_gold
+
+    gold_df = load_gold()
+    if gold_df.empty:
+        typer.echo("Gold table is empty.")
+        raise typer.Exit(1)
+
+    subset = gold_df[gold_df["league"] == league] if "league" in gold_df.columns else gold_df
+    if subset.empty:
+        typer.echo(f"No data found for league '{league}'.")
+        raise typer.Exit(1)
+
+    # Gold table stores slugified IDs (e.g. "boston-celtics"). Convert back to
+    # title-cased display names so users know what to type in the predict-game form.
+    homes = subset["home_team_id"].dropna().unique() if "home_team_id" in subset.columns else []
+    aways = subset["away_team_id"].dropna().unique() if "away_team_id" in subset.columns else []
+    team_ids = sorted(set(list(homes)) | set(list(aways)))
+    teams = [tid.replace("-", " ").title() for tid in team_ids]
+    typer.echo(f"\nTeams in {league.upper()} ({len(teams)} teams)  — use these names exactly:")
+    for t in teams:
+        typer.echo(f"  {t}")
+    typer.echo()
+
+
+# ---------------------------------------------------------------------------
 # backtest
 # ---------------------------------------------------------------------------
 
