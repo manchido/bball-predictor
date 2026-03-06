@@ -28,7 +28,10 @@ _TZ = ZoneInfo(settings.timezone)
 
 router = APIRouter(tags=["predictions"])
 
-LEAGUES = ["euroleague", "eurocup", "acb", "bsl", "bbl"]
+LEAGUES = [
+    "euroleague", "eurocup", "acb", "bsl", "bbl",
+    "nba", "lkl", "koris", "nbl_cz", "aba", "cba", "hung",
+]
 
 # Module-level model handle (loaded at app startup via lifespan)
 _ensemble = None
@@ -189,9 +192,9 @@ def _predict_games(
         current_season = _infer_season(now)
         feature_row = adjuster.apply_adjustment(feature_row, injury_data, season=current_season)
 
-        # Predict
+        # Predict (pass league for per-league bias correction)
         X = np.array([[feature_row.get(c, 0.0) for c in FEATURE_COLS]], dtype=np.float32)
-        preds = ensemble.predict(X, game_ids=[game_id])
+        preds = ensemble.predict(X, game_ids=[game_id], leagues=[league])
         p = preds[0]
 
         # Odds
@@ -200,6 +203,13 @@ def _predict_games(
         book_spread = odds.book_spread if odds else None
         odds_source = odds.odds_source if odds else None
         edge = round(p.total_mean - book_total, 2) if book_total else None
+
+        # Pace (possessions per 40 min, rolling L5)
+        import math
+        _hp = feature_row.get("home_pace_per40_l5")
+        _ap = feature_row.get("away_pace_per40_l5")
+        home_pace = round(_hp, 2) if _hp and not math.isnan(_hp) and _hp > 0 else None
+        away_pace = round(_ap, 2) if _ap and not math.isnan(_ap) and _ap > 0 else None
 
         match_str = f"{game['away_team']} @ {game['home_team']}"
         pred_resp = PredictionResponse(
@@ -219,6 +229,8 @@ def _predict_games(
             edge=edge,
             odds_source=odds_source,
             timestamp=now,
+            home_pace=home_pace,
+            away_pace=away_pace,
         )
         predictions.append(pred_resp)
 

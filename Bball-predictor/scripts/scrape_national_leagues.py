@@ -1,5 +1,7 @@
 """
-Historical national league scraper: ACB (Spain), BBL (Germany), BSL (Turkey).
+Historical national league scraper: ACB (Spain), BBL (Germany), BSL (Turkey),
+NBA, LKL (Lithuania), Korisliiga (Finland), NBL Czech Republic,
+ABA League (Balkans), CBA (China), Hungary NB I/A.
 
 Data sources
 ────────────
@@ -7,18 +9,18 @@ Data sources
          Calendar page:  /calendario/index/temporada_id/{year}
          Box score page: /partido/estadisticas/id/{game_id}
 
-  BBL  → SofaScore unofficial API  (api.sofascore.com)
-  BSL  → SofaScore unofficial API  (api.sofascore.com)
+  All SofaScore leagues → SofaScore unofficial API  (api.sofascore.com)
 
-         SofaScore tournament / season IDs (verified 2025-03-03):
-           BBL tournament_id = 227  (Germany BBL)
-           BSL tournament_id = 519  (Turkish Basketball Super League)
-           BBL 23/24 season_id = 52951
-           BBL 24/25 season_id = 65031
-           BBL 25/26 season_id = 79994
-           BSL 23/24 season_id = 54528
-           BSL 24/25 season_id = 65808
-           BSL 25/26 season_id = 81036
+         SofaScore tournament / season IDs (verified 2025-03-03 / 2026-03-05):
+           BBL  tid=227   23/24=52951  24/25=65031  25/26=79994
+           BSL  tid=519   23/24=54528  24/25=65808  25/26=81036
+           NBA  tid=132   23/24=54105  24/25=65360  25/26=80229
+           LKL  tid=975   23/24=54106  24/25=65649  25/26=80356
+           KORIS tid=226  23/24=54554  24/25=63705  25/26=79938
+           NBLCZ tid=250  23/24=53056  24/25=63530  25/26=77912
+           ABA  tid=235   23/24=53473  24/25=61743  25/26=80150
+           CBA  tid=1566  23/24=55486  24/25=67166  25/26=85375
+           HUNG tid=10594 23/24=55019  24/25=66422  25/26=79941
 
 Pipeline (identical silver format to scrape_euroleague.py):
   1. Fetch season schedule     → bronze/{league}/{season}/schedule.json
@@ -82,8 +84,9 @@ ACB_SEASON_IDS: dict[str, tuple[str, int]] = {
     "ACB2025": ("2025-26", 2025),
 }
 
-# SofaScore configuration for BBL + BSL
+# SofaScore configuration for BBL, BSL and expanded leagues
 # IDs verified 2025-03-03 via api.sofascore.com/api/v1/category/{cat_id}/unique-tournaments
+# New league IDs verified 2026-03-05 via probe_seasons.py
 SOFASCORE_LEAGUES: dict[str, dict] = {
     "bbl": {
         "tournament_id": 227,   # Germany BBL
@@ -101,6 +104,69 @@ SOFASCORE_LEAGUES: dict[str, dict] = {
             "BSL2023": ("2023-24", 54528),
             "BSL2024": ("2024-25", 65808),
             "BSL2025": ("2025-26", 81036),
+        },
+    },
+    "nba": {
+        "tournament_id": 132,   # NBA
+        "league_name": "nba",
+        "seasons": {
+            "NBA2023": ("2023-24", 54105),
+            "NBA2024": ("2024-25", 65360),
+            "NBA2025": ("2025-26", 80229),
+        },
+    },
+    "lkl": {
+        "tournament_id": 975,   # Lithuanian Basketball League (LKL)
+        "league_name": "lkl",
+        "seasons": {
+            "LKL2023": ("2023-24", 54106),
+            "LKL2024": ("2024-25", 65649),
+            "LKL2025": ("2025-26", 80356),
+        },
+    },
+    "koris": {
+        "tournament_id": 226,   # Korisliiga (Finland)
+        "league_name": "koris",
+        "seasons": {
+            "KORIS2023": ("2023-24", 54554),
+            "KORIS2024": ("2024-25", 63705),
+            "KORIS2025": ("2025-26", 79938),
+        },
+    },
+    "nbl_cz": {
+        "tournament_id": 250,   # NBL Czech Republic
+        "league_name": "nbl_cz",
+        "seasons": {
+            "NBLCZ2023": ("2023-24", 53056),
+            "NBLCZ2024": ("2024-25", 63530),
+            "NBLCZ2025": ("2025-26", 77912),
+        },
+    },
+    "aba": {
+        "tournament_id": 235,   # ABA League (Adriatic Basketball Association)
+        "league_name": "aba",
+        "seasons": {
+            "ABA2023": ("2023-24", 53473),
+            "ABA2024": ("2024-25", 61743),
+            "ABA2025": ("2025-26", 80150),
+        },
+    },
+    "cba": {
+        "tournament_id": 1566,  # CBA (Chinese Basketball Association)
+        "league_name": "cba",
+        "seasons": {
+            "CBA2023": ("2023-24", 55486),
+            "CBA2024": ("2024-25", 67166),
+            "CBA2025": ("2025-26", 85375),
+        },
+    },
+    "hung": {
+        "tournament_id": 10594, # Hungarian NB I/A
+        "league_name": "hung",
+        "seasons": {
+            "HUNG2023": ("2023-24", 55019),
+            "HUNG2024": ("2024-25", 66422),
+            "HUNG2025": ("2025-26", 79941),
         },
     },
 }
@@ -850,9 +916,9 @@ def _save_to_silver(league: str, schedule_rows: list[dict], player_rows: list[di
 @app.command()
 def main(
     leagues: list[str] = typer.Option(
-        ["acb", "bbl", "bsl"],
+        ["acb", "bbl", "bsl", "nba", "lkl", "koris", "nbl_cz", "aba", "cba", "hung"],
         "--league",
-        help="League(s): acb, bbl, bsl. Repeat for multiple.",
+        help="League(s): acb, bbl, bsl, nba, lkl, koris, nbl_cz, aba, cba, hung. Repeat for multiple.",
     ),
     seasons: list[str] = typer.Option(
         [],
@@ -875,7 +941,7 @@ def main(
         help="Refresh current-season data only: invalidate schedule cache, keep existing box scores.",
     ),
 ) -> None:
-    """Scrape ACB / BBL / BSL historical data and build silver/gold tables."""
+    """Scrape ACB / BBL / BSL / NBA / LKL / KORIS / NBL_CZ / ABA / CBA / HUNG historical data and build silver/gold tables."""
     setup_logging(log_level="INFO", log_dir=settings.logs_dir)
     settings.ensure_dirs()
 
@@ -972,7 +1038,7 @@ def main(
                         typer.echo(f"  ⚠  No {league_key.upper()} data collected")
 
                 else:
-                    typer.echo(f"  Unknown league {league_key!r}. Valid: acb, bbl, bsl")
+                    typer.echo(f"  Unknown league {league_key!r}. Valid: acb, bbl, bsl, nba, lkl, koris, nbl_cz, aba, cba, hung")
 
     asyncio.run(_run())
 

@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BballPredictor</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #080d14; font-family: 'Inter', system-ui, sans-serif; }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(14px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .card-in { animation: slideUp 0.35s ease both; }
+
+    .card-hover {
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+    .card-hover:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 14px 44px rgba(0,0,0,0.55);
+    }
+
+    .pace-fill { transition: width 0.9s cubic-bezier(.23,1,.32,1); }
+    .conf-fill { transition: width 0.7s cubic-bezier(.23,1,.32,1); }
+
+    .spinner {
+      display: inline-block; width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Accordion games grid */
+    .games-grid {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.35s cubic-bezier(.23,1,.32,1);
+    }
+    .games-grid.open {
+      grid-template-rows: 1fr;
+    }
+    .games-grid-inner { overflow: hidden; }
+
+    /* Chevron rotate */
+    .chevron { transition: transform 0.3s ease; }
+    .chevron.open { transform: rotate(180deg); }
+
+    /* League row hover */
+    .league-row {
+      transition: background 0.15s ease;
+      cursor: pointer;
+    }
+    .league-row:hover { background: rgba(255,255,255,0.04); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #111; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
+  </style>
+</head>
+
+<body class="text-gray-100 min-h-screen">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useCallback, useMemo } = React;
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const ALL_LEAGUES = [
+  'euroleague','eurocup','nba','acb','bbl',
+  'bsl','lkl','koris','nbl_cz','aba','cba','hung',
+];
+
+const LEAGUE_META = {
+  euroleague: { name: 'EuroLeague',  color: '#3B82F6' },
+  eurocup:    { name: 'EuroCup',     color: '#8B5CF6' },
+  nba:        { name: 'NBA',          color: '#EF4444' },
+  acb:        { name: 'ACB',          color: '#F59E0B' },
+  bbl:        { name: 'BBL',          color: '#9CA3AF' },
+  bsl:        { name: 'BSL',          color: '#06B6D4' },
+  lkl:        { name: 'LKL',          color: '#10B981' },
+  koris:      { name: 'Korisliiga',   color: '#0EA5E9' },
+  nbl_cz:     { name: 'NBL CZ',       color: '#A855F7' },
+  aba:        { name: 'ABA League',   color: '#EC4899' },
+  cba:        { name: 'CBA',          color: '#F97316' },
+  hung:       { name: 'Hungary',      color: '#84CC16' },
+};
+
+// Pace thresholds: possessions per 40 player-minutes (from training data analysis)
+const PACE_GRADES = [
+  { max: 6.5,      label: 'Very Slow', emoji: '🐢', color: '#6B7280' },
+  { max: 7.3,      label: 'Slow',      emoji: '🚶', color: '#60A5FA' },
+  { max: 7.8,      label: 'Medium',    emoji: '🏃', color: '#34D399' },
+  { max: 8.8,      label: 'Fast',      emoji: '⚡', color: '#FBBF24' },
+  { max: Infinity, label: 'Very Fast', emoji: '🚀', color: '#FB923C' },
+];
+
+const PACE_MIN = 4.0;
+const PACE_MAX = 13.0;
+
+// ── Pure helpers ─────────────────────────────────────────────────────────────
+
+const leagueColor = (lg) => LEAGUE_META[lg]?.color ?? '#6B7280';
+const leagueName  = (lg) => LEAGUE_META[lg]?.name  ?? lg.toUpperCase();
+
+function gradePace(pace) {
+  if (!pace || pace <= 0) return { label: 'N/A', emoji: '—', color: '#4B5563' };
+  return PACE_GRADES.find(g => pace < g.max) ?? PACE_GRADES[PACE_GRADES.length - 1];
+}
+
+function paceBarPct(pace) {
+  return Math.min(100, Math.max(4, ((pace - PACE_MIN) / (PACE_MAX - PACE_MIN)) * 100));
+}
+
+function confidenceColor(c) {
+  if (c > 0.65) return '#34D399';
+  if (c > 0.45) return '#FBBF24';
+  return '#F87171';
+}
+
+function formatDate(d) {
+  return new Date(d + 'T12:00:00').toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric',
+  });
+}
+
+function awayTeam(match) { return match.split(' @ ')[0] ?? match; }
+function homeTeam(match) { return match.split(' @ ')[1] ?? match; }
+
+function todayStr() {
+  return new Date().toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
+}
+
+// Range bar context helpers
+function barContext(game) {
+  const half = (game.model_total_p90 - game.model_total_p10) / 2;
+  const ctx  = Math.max(30, half * 1.4);
+  return { lo: game.model_total_mean - ctx, hi: game.model_total_mean + ctx };
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+function PaceRow({ pace, side }) {
+  if (!pace) return <div className="mt-2 text-[9px] text-gray-700">pace n/a</div>;
+  const grade = gradePace(pace);
+  const pct   = paceBarPct(pace);
+  const isHome = side === 'home';
+
+  return (
+    <div className={`mt-2.5 ${isHome ? 'text-right' : ''}`}>
+      <div className={`flex items-center gap-1.5 mb-1 ${isHome ? 'justify-end' : ''}`}>
+        {isHome && (
+          <span className="text-[10px] font-bold" style={{ color: grade.color }}>
+            {grade.label}
+          </span>
+        )}
+        <span className="text-sm leading-none">{grade.emoji}</span>
+        {!isHome && (
+          <span className="text-[10px] font-bold" style={{ color: grade.color }}>
+            {grade.label}
+          </span>
+        )}
+      </div>
+      <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full pace-fill ${isHome ? 'ml-auto' : ''}`}
+          style={{ width: `${pct}%`, background: grade.color }}
+        />
+      </div>
+      <div className={`text-[9px] text-gray-600 mt-0.5 tabular-nums`}>
+        {pace.toFixed(1)} poss/40
+      </div>
+    </div>
+  );
+}
+
+function GameCard({ game, league, index }) {
+  const color  = leagueColor(league);
+  const { lo, hi } = barContext(game);
+  const rangeLeft  = Math.max(0, ((game.model_total_p10 - lo) / (hi - lo)) * 100);
+  const rangeWidth = Math.min(100, ((game.model_total_p90 - game.model_total_p10) / (hi - lo)) * 100);
+  const meanPct    = ((game.model_total_mean - lo) / (hi - lo)) * 100;
+  const confColor  = confidenceColor(game.confidence);
+
+  return (
+    <div
+      className="card-hover card-in rounded-2xl overflow-hidden"
+      style={{
+        background: 'linear-gradient(160deg, #0f1923 0%, #111b27 100%)',
+        border: '1px solid #1e2d3d',
+        borderTopColor: color + '66',
+        animationDelay: `${index * 60}ms`,
+      }}
+    >
+      {/* Top accent bar */}
+      <div
+        className="h-0.5 w-full"
+        style={{ background: `linear-gradient(90deg, ${color}, transparent)` }}
+      />
+
+      {/* Header: league badge + date */}
+      <div className="flex items-center justify-between px-4 pt-3 pb-2">
+        <span
+          className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md"
+          style={{ background: color + '22', color }}
+        >
+          {leagueName(league)}
+        </span>
+        <span className="text-[10px] text-gray-600">{formatDate(game.date)}</span>
+      </div>
+
+      {/* ── Score section ── */}
+      <div className="px-4 pt-1 pb-3">
+        <div className="flex items-start gap-2">
+
+          {/* Away */}
+          <div className="flex-1 min-w-0">
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1">Away</div>
+            <div className="text-xs font-semibold text-gray-300 truncate leading-snug" title={awayTeam(game.match)}>
+              {awayTeam(game.match)}
+            </div>
+            <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
+              {game.model_away_mean.toFixed(1)}
+            </div>
+            <PaceRow pace={game.away_pace} side="away" />
+          </div>
+
+          {/* VS divider */}
+          <div className="flex flex-col items-center pt-5 gap-1.5 px-0.5">
+            <div className="text-[10px] font-black text-gray-700">VS</div>
+            <div className="w-px flex-1 bg-gray-800" style={{ minHeight: 40 }} />
+          </div>
+
+          {/* Home */}
+          <div className="flex-1 min-w-0 text-right">
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1">Home</div>
+            <div className="text-xs font-semibold text-gray-300 truncate leading-snug" title={homeTeam(game.match)}>
+              {homeTeam(game.match)}
+            </div>
+            <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
+              {game.model_home_mean.toFixed(1)}
+            </div>
+            <PaceRow pace={game.home_pace} side="home" />
+          </div>
+
+        </div>
+      </div>
+
+      {/* ── Total + Range section ── */}
+      <div className="mx-4 py-3 border-t border-gray-800/60">
+        <div className="flex items-end justify-between">
+          <div>
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">
+              Total Predicted
+            </div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-2xl font-black text-white tabular-nums">
+                {game.model_total_mean.toFixed(1)}
+              </span>
+              <span className="text-xs text-gray-500">pts</span>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">
+              80% Range
+            </div>
+            <div className="text-xs font-bold tabular-nums" style={{ color: color + 'cc' }}>
+              {Math.round(game.model_total_p10)} &mdash; {Math.round(game.model_total_p90)}
+            </div>
+            <div className="text-[9px] text-gray-700 mt-0.5">
+              ±{Math.round((game.model_total_p90 - game.model_total_p10) / 2)} pts
+            </div>
+          </div>
+        </div>
+
+        {/* Range bar */}
+        <div className="mt-2 relative h-1 bg-gray-800 rounded-full overflow-hidden">
+          <div
+            className="absolute h-full rounded-full"
+            style={{
+              left: `${rangeLeft}%`,
+              width: `${rangeWidth}%`,
+              background: `linear-gradient(90deg, ${color}55, ${color})`,
+            }}
+          />
+          {/* Mean marker */}
+          <div
+            className="absolute top-0 h-full w-0.5 bg-white rounded-full"
+            style={{ left: `${meanPct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* ── Confidence + Edge ── */}
+      <div className="px-4 pb-4 space-y-2">
+
+        {/* Confidence bar */}
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider w-16 shrink-0">
+            Confidence
+          </span>
+          <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full conf-fill"
+              style={{
+                width: `${(game.confidence * 100).toFixed(0)}%`,
+                background: `linear-gradient(90deg, ${confColor}88, ${confColor})`,
+              }}
+            />
+          </div>
+          <span
+            className="text-[10px] font-bold w-7 text-right tabular-nums"
+            style={{ color: confColor }}
+          >
+            {(game.confidence * 100).toFixed(0)}%
+          </span>
+        </div>
+
+        {/* Edge vs book line */}
+        {game.edge !== null && game.book_total && (
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider w-16 shrink-0">
+              vs Line
+            </span>
+            <span
+              className="text-xs font-bold"
+              style={{ color: game.edge > 0 ? '#34D399' : '#F87171' }}
+            >
+              {game.edge > 0 ? '↑' : '↓'} {game.edge > 0 ? '+' : ''}{game.edge.toFixed(1)} pts
+            </span>
+            <span className="text-[9px] text-gray-600">
+              (line {game.book_total.toFixed(1)})
+            </span>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+function LeagueAccordion({ league, games, isOpen, onToggle }) {
+  const color   = leagueColor(league);
+  const avgTotal = (games.reduce((s, g) => s + g.model_total_mean, 0) / games.length).toFixed(1);
+  const minTotal = Math.round(Math.min(...games.map(g => g.model_total_p10)));
+  const maxTotal = Math.round(Math.max(...games.map(g => g.model_total_p90)));
+
+  return (
+    <div
+      className="rounded-2xl overflow-hidden mb-3"
+      style={{ border: '1px solid #1e2d3d' }}
+    >
+      {/* ── League header row (click to toggle) ── */}
+      <div
+        className="league-row flex items-center gap-4 px-5 py-4 rounded-2xl"
+        style={{ borderLeft: `3px solid ${color}` }}
+        onClick={onToggle}
+        role="button"
+        aria-expanded={isOpen}
+      >
+        {/* Dot + name */}
+        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+          <span className="font-black text-sm text-white tracking-wide">{leagueName(league)}</span>
+
+          {/* Game count badge */}
+          <span
+            className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0"
+            style={{ background: color + '22', color }}
+          >
+            {games.length} game{games.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+
+        {/* Stats summary — hidden on small screens */}
+        <div className="hidden sm:flex items-center gap-6 text-xs text-gray-500 shrink-0">
+          <div className="text-center">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-gray-600 mb-0.5">Avg Total</div>
+            <div className="font-bold text-gray-300 tabular-nums">{avgTotal}</div>
+          </div>
+          <div className="text-center">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-gray-600 mb-0.5">Range</div>
+            <div className="font-bold tabular-nums" style={{ color: color + 'cc' }}>{minTotal}–{maxTotal}</div>
+          </div>
+        </div>
+
+        {/* Chevron */}
+        <svg
+          className={`chevron shrink-0 ${isOpen ? 'open' : ''}`}
+          width="16" height="16" viewBox="0 0 16 16" fill="none"
+        >
+          <path d="M4 6l4 4 4-4" stroke="#6B7280" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
+
+      {/* ── Collapsible games grid ── */}
+      <div className={`games-grid ${isOpen ? 'open' : ''}`}>
+        <div className="games-grid-inner">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 px-4 pb-5 pt-2">
+            {games.map((game, idx) => (
+              <GameCard key={game.game_id} game={game} league={league} index={idx} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+
+function App() {
+  const [predictions,     setPredictions]     = useState([]);
+  const [loading,         setLoading]         = useState(false);
+  const [error,           setError]           = useState(null);
+  const [warnings,        setWarnings]        = useState([]);
+  const [lastFetched,     setLastFetched]     = useState(null);
+  const [selectedLeagues, setSelectedLeagues] = useState([]);
+  const [openLeagues,     setOpenLeagues]     = useState(new Set());
+
+  const toggleLeague = useCallback((lg) => {
+    setSelectedLeagues(prev =>
+      prev.includes(lg) ? prev.filter(l => l !== lg) : [...prev, lg]
+    );
+  }, []);
+
+  const groupedGames = useMemo(() => {
+    const groups = {};
+    for (const g of predictions) {
+      if (!groups[g.league]) groups[g.league] = [];
+      groups[g.league].push(g);
+    }
+    return groups;
+  }, [predictions]);
+
+  const leagueCount = Object.keys(groupedGames).length;
+
+  const toggleLeagueOpen = useCallback((lg) => {
+    setOpenLeagues(prev => {
+      const next = new Set(prev);
+      next.has(lg) ? next.delete(lg) : next.add(lg);
+      return next;
+    });
+  }, []);
+
+  const allExpanded = leagueCount > 0 && openLeagues.size === leagueCount;
+  const toggleAll = useCallback(() => {
+    setOpenLeagues(prev =>
+      prev.size === leagueCount
+        ? new Set()
+        : new Set(Object.keys(groupedGames))
+    );
+  }, [leagueCount, groupedGames]);
+
+  const fetchPredictions = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setWarnings([]);
+    setPredictions([]);
+
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 90_000); // 90s max
+
+    try {
+      const params = selectedLeagues.length > 0
+        ? '?' + selectedLeagues.map(l => 'leagues=' + encodeURIComponent(l)).join('&')
+        : '';
+
+      const res = await fetch('/predict/today' + params, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail ?? `Server error ${res.status}`);
+      }
+      const data = await res.json();
+      const games = data.games ?? [];
+      setPredictions(games);
+      setWarnings(data.warnings ?? []);
+      setLastFetched(new Date());
+      // Auto-open leagues that have games, collapsed by default (user expands)
+      setOpenLeagues(new Set());
+    } catch (e) {
+      clearTimeout(timeout);
+      if (e.name === 'AbortError') {
+        setError('Request timed out after 90 seconds. Make sure the prediction server is running (uvicorn src.api.main:app).');
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedLeagues]);
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
+
+      {/* ── Header ── */}
+      <header className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-3">
+          <span className="text-4xl select-none">🏀</span>
+          <div>
+            <h1 className="text-xl font-black tracking-tight text-white">BballPredictor</h1>
+            <p className="text-xs text-gray-500 mt-0.5">International Basketball · Totals Prediction</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">Today</p>
+          <p className="text-sm font-semibold text-gray-300">{todayStr()}</p>
+        </div>
+      </header>
+
+      {/* ── League filter pills ── */}
+      <div className="flex flex-wrap gap-2 mb-5">
+        {ALL_LEAGUES.map(lg => {
+          const active = selectedLeagues.includes(lg);
+          const col    = leagueColor(lg);
+          return (
+            <button
+              key={lg}
+              onClick={() => toggleLeague(lg)}
+              className="px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150"
+              style={active
+                ? { background: col + '33', color: col, borderColor: col }
+                : { background: 'transparent', color: '#6B7280', borderColor: '#374151' }
+              }
+            >
+              {leagueName(lg)}
+            </button>
+          );
+        })}
+        {selectedLeagues.length > 0 && (
+          <button
+            onClick={() => setSelectedLeagues([])}
+            className="px-3 py-1 rounded-full text-xs font-medium border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-all"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      {/* ── Predict button ── */}
+      <div className="flex items-center gap-4 mb-10">
+        <button
+          onClick={fetchPredictions}
+          disabled={loading}
+          className="flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm text-white transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            background: 'linear-gradient(135deg, #2563EB 0%, #7C3AED 100%)',
+            boxShadow: loading ? 'none' : '0 4px 20px rgba(37,99,235,0.4)',
+          }}
+        >
+          {loading ? <span className="spinner" /> : <span>🔮</span>}
+          {loading ? 'Fetching predictions…' : "Predict Today's Games"}
+        </button>
+
+        {lastFetched && !loading && (
+          <p className="text-sm text-gray-400">
+            <span className="text-white font-semibold">{predictions.length}</span> games ·{' '}
+            <span className="text-white font-semibold">{leagueCount}</span> league{leagueCount !== 1 ? 's' : ''}
+          </p>
+        )}
+      </div>
+
+      {/* ── Error ── */}
+      {error && (
+        <div className="bg-red-950 border border-red-800 rounded-xl p-4 mb-8 flex items-start gap-3">
+          <span className="text-xl">⚠️</span>
+          <div>
+            <p className="font-semibold text-red-300 text-sm">Prediction failed</p>
+            <p className="text-red-400 text-xs mt-1">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Empty state ── */}
+      {lastFetched && !loading && predictions.length === 0 && !error && (
+        <div className="text-center py-20 text-gray-600">
+          <p className="text-5xl mb-4">📅</p>
+          <p className="text-lg font-semibold">No games scheduled today</p>
+          <p className="text-sm mt-1">Check back tomorrow or try a different league filter.</p>
+        </div>
+      )}
+
+      {/* ── Expand / Collapse All ── */}
+      {leagueCount > 1 && (
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-xs text-gray-600">
+            {openLeagues.size} of {leagueCount} leagues expanded
+          </p>
+          <button
+            onClick={toggleAll}
+            className="text-xs font-semibold text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1.5"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              {allExpanded
+                ? <path d="M2 8l4-4 4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                : <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              }
+            </svg>
+            {allExpanded ? 'Collapse All' : 'Expand All'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Accordion leagues ── */}
+      {Object.entries(groupedGames).map(([league, games]) => (
+        <LeagueAccordion
+          key={league}
+          league={league}
+          games={games}
+          isOpen={openLeagues.has(league)}
+          onToggle={() => toggleLeagueOpen(league)}
+        />
+      ))}
+
+      {/* ── Warnings ── */}
+      {warnings.length > 0 && (
+        <div className="mt-4 space-y-1.5">
+          {warnings.map((w, i) => (
+            <div
+              key={i}
+              className="text-[11px] text-yellow-600 bg-yellow-950/40 border border-yellow-900/60 rounded-lg px-3 py-2"
+            >
+              ⚠ {w}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Footer ── */}
+      <footer className="mt-16 pt-6 border-t border-gray-900 flex items-center justify-between text-[11px] text-gray-700">
+        <span>BballPredictor · International Basketball Totals</span>
+        <span>For research use only</span>
+      </footer>
+
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

@@ -29,6 +29,8 @@ class PredictionResponse(BaseModel):
     edge: Optional[float] = None          # model_mean - book_total (None if no line)
     odds_source: Optional[str] = None
     timestamp: datetime
+    home_pace: Optional[float] = None     # home team pace_per40 (rolling L5)
+    away_pace: Optional[float] = None     # away team pace_per40 (rolling L5)
 
 
 class TodayPredictionsResponse(BaseModel):

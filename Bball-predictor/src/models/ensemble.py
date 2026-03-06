@@ -186,7 +186,9 @@ class BballEnsemble:
     def __init__(self) -> None:
         self.home_model = StackedEnsemble(seed=SEED)
         self.away_model = StackedEnsemble(seed=SEED)
-        self._calibration_scale: float = 1.0  # set by CalibrationWrapper
+        self._calibration_scale: float = 1.0  # set during training
+        self._league_home_bias: dict[str, float] = {}  # per-league mean home residual
+        self._league_away_bias: dict[str, float] = {}  # per-league mean away residual
         self._fitted: bool = False
 
     def fit(
@@ -206,7 +208,10 @@ class BballEnsemble:
         return self
 
     def predict(
-        self, X: np.ndarray, game_ids: Optional[list[str]] = None
+        self,
+        X: np.ndarray,
+        game_ids: Optional[list[str]] = None,
+        leagues: Optional[list[str]] = None,
     ) -> list[PredictionResult]:
         if not self._fitted:
             raise RuntimeError("Ensemble not fitted.")
@@ -218,24 +223,33 @@ class BballEnsemble:
         results: list[PredictionResult] = []
 
         for i in range(len(home_mean)):
-            total_mean = float(home_mean[i] + away_mean[i])
-            # Sum of intervals → expand by calibration scale
+            # Per-league bias correction (zero if league unknown or bias not fitted)
+            if leagues and self._league_home_bias:
+                lg = leagues[i]
+                home_bias = self._league_home_bias.get(lg, 0.0)
+                away_bias = self._league_away_bias.get(lg, 0.0)
+            else:
+                home_bias = away_bias = 0.0
+
+            h_mean = float(home_mean[i]) + home_bias
+            a_mean = float(away_mean[i]) + away_bias
+            total_mean = h_mean + a_mean
+
+            # Intervals: shift by total bias, keep width driven by calibration scale
             raw_p10 = float(home_p10[i] + away_p10[i])
             raw_p90 = float(home_p90[i] + away_p90[i])
-
-            mid = total_mean
             half_width = (raw_p90 - raw_p10) / 2 * scale
-            p10 = mid - half_width
-            p90 = mid + half_width
-            p50 = mid
+            p10 = total_mean - half_width
+            p90 = total_mean + half_width
+            p50 = total_mean
 
             width = p90 - p10
             confidence = float(np.clip(1 - width / max(total_mean, 1), 0, 1))
 
             results.append(PredictionResult(
                 game_id=game_ids[i] if game_ids else str(i),
-                home_pred_mean=float(home_mean[i]),
-                away_pred_mean=float(away_mean[i]),
+                home_pred_mean=h_mean,
+                away_pred_mean=a_mean,
                 total_mean=total_mean,
                 total_p10=p10,
                 total_p50=p50,

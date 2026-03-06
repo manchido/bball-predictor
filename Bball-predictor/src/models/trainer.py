@@ -121,12 +121,25 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
     scale = calibrate_intervals(val_total_mean, val_total_p10, val_total_p90, val_actuals)
     ensemble._calibration_scale = scale
 
+    # --- Per-league bias correction (computed on val set) ---
+    if "league" in val_df.columns:
+        val_home_preds = np.array([p.home_pred_mean for p in val_preds])
+        val_away_preds = np.array([p.away_pred_mean for p in val_preds])
+        bias_df = val_df[["league"]].copy().reset_index(drop=True)
+        bias_df["home_resid"] = y_home_val - val_home_preds
+        bias_df["away_resid"] = y_away_val - val_away_preds
+        ensemble._league_home_bias = bias_df.groupby("league")["home_resid"].mean().round(4).to_dict()
+        ensemble._league_away_bias = bias_df.groupby("league")["away_resid"].mean().round(4).to_dict()
+        logger.info("Per-league home bias: {}", ensemble._league_home_bias)
+        logger.info("Per-league away bias: {}", ensemble._league_away_bias)
+
     # --- Test metrics ---
     metrics: dict[str, Any] = {}
 
     if not test_df.empty:
         X_test, y_home_test, y_away_test, test_ids = _prepare_xy(test_df, FEATURE_COLS)
-        test_preds = ensemble.predict(X_test, game_ids=test_ids.tolist())
+        test_leagues = test_df["league"].tolist() if "league" in test_df.columns else None
+        test_preds = ensemble.predict(X_test, game_ids=test_ids.tolist(), leagues=test_leagues)
 
         test_total_mean = np.array([p.total_mean for p in test_preds])
         test_total_p10  = np.array([p.total_p10  for p in test_preds])
@@ -148,6 +161,20 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
         metrics["game_total_RMSE"]  = round(rmse, 4)
         metrics["calibration_80pct"] = round(cal_report["calibrated_coverage"], 4)
         metrics["mean_interval_width"] = round(cal_report["mean_interval_width"], 4)
+
+        # Per-league MAE on test set
+        if "league" in test_df.columns:
+            test_df_copy = test_df.reset_index(drop=True).copy()
+            test_df_copy["pred_total"] = test_total_mean
+            test_df_copy["actual_total"] = test_actuals
+            test_df_copy["abs_err"] = np.abs(test_actuals - test_total_mean)
+            per_league = (
+                test_df_copy.groupby("league")
+                .agg(n=("abs_err", "count"), mae=("abs_err", "mean"))
+                .round(2)
+            )
+            metrics["per_league_mae"] = per_league["mae"].to_dict()
+            logger.info("Per-league test MAE:\n{}", per_league.to_string())
 
         # Edge tracking (requires book_total column)
         if "book_total" in test_df.columns:

@@ -81,7 +81,10 @@ def predict_today(
     _init()
     logger.info("CLI: predict_today")
 
-    active_leagues = leagues or ["euroleague", "eurocup", "acb", "bsl", "bbl"]
+    active_leagues = leagues or [
+        "euroleague", "eurocup", "acb", "bsl", "bbl",
+        "nba", "lkl", "koris", "nbl_cz", "aba", "cba", "hung",
+    ]
 
     async def _run() -> None:
         from src.models.ensemble import BballEnsemble
@@ -199,7 +202,8 @@ def backtest(
 
     X = subset.reindex(columns=FEATURE_COLS, fill_value=0).values.astype(np.float32)
     actuals = (subset["home_points"] + subset["away_points"]).values
-    preds = ensemble.predict(X, game_ids=subset["game_id"].tolist())
+    leagues_list = subset["league"].tolist() if "league" in subset.columns else None
+    preds = ensemble.predict(X, game_ids=subset["game_id"].tolist(), leagues=leagues_list)
 
     pred_means = np.array([p.total_mean for p in preds])
     pred_p10   = np.array([p.total_p10  for p in preds])
@@ -314,9 +318,13 @@ def refresh_data(
         check=True,
     )
 
-    typer.echo("\n── ACB + BBL + BSL ──────────────────────────────────────")
+    typer.echo("\n── ACB + BBL + BSL + NBA + LKL + KORIS + NBL_CZ + ABA + CBA + HUNG ──────────")
     subprocess.run(
         [sys.executable, str(scripts_dir / "scrape_national_leagues.py"),
+         "--league", "acb", "--league", "bbl", "--league", "bsl",
+         "--league", "nba", "--league", "lkl", "--league", "koris",
+         "--league", "nbl_cz", "--league", "aba", "--league", "cba",
+         "--league", "hung",
          "--incremental", "--no-build-gold"],
         check=True,
     )

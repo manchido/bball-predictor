@@ -22,7 +22,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from src.utils.ids import make_game_id, get_team_id
 from src.utils.logging import logger
@@ -62,15 +62,29 @@ _EL_CURRENT: dict[str, tuple[str, str, str]] = {
 
 _SF_CURRENT: dict[str, tuple[int, int, str]] = {
     # league → (tournament_id, season_id, season_label)
-    "bbl": (227, 79994, "2025-26"),
-    "bsl": (519, 81036, "2025-26"),
+    "bbl":    (227,   79994, "2025-26"),
+    "bsl":    (519,   81036, "2025-26"),
+    "nba":    (132,   80229, "2025-26"),
+    "lkl":    (975,   80356, "2025-26"),
+    "koris":  (226,   79938, "2025-26"),
+    "nbl_cz": (250,   77912, "2025-26"),
+    "aba":    (235,   80150, "2025-26"),
+    "cba":    (1566,  85375, "2025-26"),
+    "hung":   (10594, 79941, "2025-26"),
 }
 
 _ACB_SEASON_YEAR = 2025  # temporada_id = start year of current season
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry on transient server/network errors only — never on 4xx client errors."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500  # 5xx = server-side transient
+    return isinstance(exc, httpx.TimeoutException)  # network timeout
+
+
 @retry(
-    retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+    retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=2, min=2, max=15),
     reraise=True,

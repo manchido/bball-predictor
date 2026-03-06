@@ -29,7 +29,10 @@ from src.utils.logging import logger, setup_logging
 _TZ = ZoneInfo(settings.timezone)
 _scheduler: AsyncIOScheduler | None = None
 
-LEAGUES = ["euroleague", "eurocup", "acb", "bsl", "bbl"]
+LEAGUES = [
+    "euroleague", "eurocup", "acb", "bsl", "bbl",
+    "nba", "lkl", "koris", "nbl_cz", "aba", "cba", "hung",
+]
 
 
 async def run_daily_pipeline() -> None:
