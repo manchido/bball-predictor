@@ -94,6 +94,61 @@ def build_team_rolling_features(team_game_df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask, f"pts_scored_{side}_l5"] = grp.transform(lambda s: _rolling_mean(s, 5))
         df.loc[mask, f"pts_scored_{side}_l10"] = grp.transform(lambda s: _rolling_mean(s, 10))
 
+    # ── Opponent-adjusted rolling features ──────────────────────────────────
+    # For each team-game, measure performance relative to the opponent's quality:
+    #   adj_pts_scored  = points_scored  - opponent's pre-game avg pts_allowed
+    #   adj_pts_allowed = points_allowed - opponent's pre-game avg pts_scored
+    #
+    # Positive adj_pts_scored  → scored more than opponent's defense usually allows
+    # Negative adj_pts_allowed → held opponent below their usual offensive output
+    #
+    # No leakage: opponent's "pre-game" stats are opp_points_l10 / points_l10
+    # which are already computed with shift(1) above.
+    if "opp_points_l10" in df.columns and "points_l10" in df.columns:
+        # Build (game_id, team_id) → opponent_team_id mapping
+        pairs = (
+            df[["game_id", "team_id"]]
+            .drop_duplicates()
+            .groupby("game_id")["team_id"]
+            .apply(list)
+            .reset_index()
+        )
+        pairs = pairs[pairs["team_id"].apply(len) == 2]
+        opp_dict: dict = {}
+        for _, row in pairs.iterrows():
+            t0, t1 = row["team_id"]
+            gid = row["game_id"]
+            opp_dict[(gid, t0)] = t1
+            opp_dict[(gid, t1)] = t0
+
+        df["_opp_team_id"] = [
+            opp_dict.get((gid, tid))
+            for gid, tid in zip(df["game_id"], df["team_id"])
+        ]
+
+        # Pull opponent's pre-game rolling averages
+        opp_lookup = (
+            df[["game_id", "team_id", "opp_points_l10", "points_l10"]]
+            .rename(columns={
+                "team_id":        "_opp_team_id",
+                "opp_points_l10": "_opp_def_quality",  # avg pts opponent allows
+                "points_l10":     "_opp_off_quality",  # avg pts opponent scores
+            })
+        )
+        df = df.merge(opp_lookup, on=["game_id", "_opp_team_id"], how="left")
+
+        # Per-game adjusted values
+        df["adj_pts_scored"]  = df["points"]     - df["_opp_def_quality"]
+        df["adj_pts_allowed"] = df["opp_points"] - df["_opp_off_quality"]
+
+        # Rolling means (shift(1) inside _rolling_mean prevents leakage)
+        for col in ["adj_pts_scored", "adj_pts_allowed"]:
+            grp = df.groupby("team_id")[col]
+            df[f"{col}_l5"]  = grp.transform(lambda s: _rolling_mean(s, 5))
+            df[f"{col}_l10"] = grp.transform(lambda s: _rolling_mean(s, 10))
+
+        df = df.drop(columns=["_opp_team_id", "_opp_def_quality", "_opp_off_quality"])
+
     return df
 
 
@@ -232,6 +287,17 @@ def build_matchup_features(
     if "away_days_rest" in game_df.columns:
         game_df["away_btob"] = (game_df["away_days_rest"] <= 1).astype(int)
 
+    # Opponent-adjusted matchup interaction:
+    # matchup_adj_adv_l5  = home scored above opp defense  AND  away defense leaked above home offense
+    # matchup_adj_adv_away = mirror for the away team
+    h_adj_off = "home_adj_pts_scored_l5"
+    a_adj_def = "away_adj_pts_allowed_l5"
+    a_adj_off = "away_adj_pts_scored_l5"
+    h_adj_def = "home_adj_pts_allowed_l5"
+    if all(c in game_df.columns for c in [h_adj_off, a_adj_def, a_adj_off, h_adj_def]):
+        game_df["matchup_adj_adv_l5"]      = game_df[h_adj_off] - game_df[a_adj_def]
+        game_df["matchup_adj_adv_away_l5"] = game_df[a_adj_off] - game_df[h_adj_def]
+
     # Head-to-head
     h2h_df = build_h2h_features(
         team_game_df.drop_duplicates("game_id")[
@@ -307,6 +373,15 @@ FEATURE_COLS = [
     "home_btob", "away_btob",
     # H2H
     "h2h_total_l3",
+    # Opponent-adjusted rolling points
+    # (positive adj_scored → scored above opponent's defensive average;
+    #  negative adj_allowed → held opponent below their offensive average)
+    "home_adj_pts_scored_l5",  "home_adj_pts_scored_l10",
+    "home_adj_pts_allowed_l5", "home_adj_pts_allowed_l10",
+    "away_adj_pts_scored_l5",  "away_adj_pts_scored_l10",
+    "away_adj_pts_allowed_l5", "away_adj_pts_allowed_l10",
+    # Opponent-adjusted matchup interaction
+    "matchup_adj_adv_l5", "matchup_adj_adv_away_l5",
     # Context
     "league_id", "week_of_season",
 ]
