@@ -101,13 +101,6 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
     if train_df.empty or val_df.empty:
         raise ValueError("Train or validation set is empty. Check season labels.")
 
-    # Walk-forward CV (log fold scores, don't use for final model)
-    _walk_forward_cv(gold_df, TRAIN_SEASONS, xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
-
-    # --- Final model ---
-    X_train, y_home_train, y_away_train, _ = _prepare_xy(train_df, FEATURE_COLS)
-    X_val,   y_home_val,   y_away_val,   _ = _prepare_xy(val_df,   FEATURE_COLS)
-
     # Load tuned hyperparameters if available (produced by scripts/tune_hyperparams.py)
     best_params_path = Path(settings.models_dir) / "best_params.json"
     xgb_params = lgbm_params = rf_params = None
@@ -117,6 +110,13 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
         lgbm_params = best.get("lgbm_params")
         rf_params   = best.get("rf_params")
         logger.info("Loaded tuned hyperparameters from {}", best_params_path)
+
+    # Walk-forward CV (log fold scores, don't use for final model)
+    _walk_forward_cv(gold_df, TRAIN_SEASONS, xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
+
+    # --- Final model ---
+    X_train, y_home_train, y_away_train, _ = _prepare_xy(train_df, FEATURE_COLS)
+    X_val,   y_home_val,   y_away_val,   _ = _prepare_xy(val_df,   FEATURE_COLS)
 
     ensemble = BballEnsemble(xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
     ensemble.fit(X_train, y_home_train, y_away_train, X_val, y_home_val, y_away_val)
