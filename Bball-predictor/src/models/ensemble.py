@@ -71,54 +71,55 @@ class StackedEnsemble:
     meta: Ridge = field(init=False)
     _fitted: bool = field(default=False, init=False)
 
+    # Optional external hyperparameter overrides (from Optuna tuning)
+    xgb_params:  dict = field(default_factory=dict)
+    lgbm_params: dict = field(default_factory=dict)
+    rf_params:   dict = field(default_factory=dict)
+
     def __post_init__(self) -> None:
-        self.xgb = XGBRegressor(
+        xgb_defaults = dict(
             n_estimators=self.n_estimators_xgb,
             learning_rate=0.05,
             max_depth=5,
             subsample=0.8,
             colsample_bytree=0.8,
+            min_child_weight=3,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
             random_state=self.seed,
             n_jobs=-1,
             verbosity=0,
         )
-        self.lgbm_mean = LGBMRegressor(
+        xgb_defaults.update(self.xgb_params)
+        self.xgb = XGBRegressor(**xgb_defaults)
+
+        lgbm_defaults = dict(
             n_estimators=self.n_estimators_lgbm,
             learning_rate=0.05,
             num_leaves=63,
             subsample=0.8,
             colsample_bytree=0.8,
+            min_child_samples=10,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
             random_state=self.seed,
             n_jobs=-1,
             verbose=-1,
         )
-        self.lgbm_q10 = LGBMRegressor(
-            objective="quantile",
-            alpha=0.10,
-            n_estimators=self.n_estimators_lgbm,
-            learning_rate=0.05,
-            num_leaves=63,
-            random_state=self.seed,
-            n_jobs=-1,
-            verbose=-1,
-        )
-        self.lgbm_q90 = LGBMRegressor(
-            objective="quantile",
-            alpha=0.90,
-            n_estimators=self.n_estimators_lgbm,
-            learning_rate=0.05,
-            num_leaves=63,
-            random_state=self.seed,
-            n_jobs=-1,
-            verbose=-1,
-        )
-        self.rf = RandomForestRegressor(
+        lgbm_defaults.update(self.lgbm_params)
+        self.lgbm_mean = LGBMRegressor(**lgbm_defaults)
+        self.lgbm_q10  = LGBMRegressor(objective="quantile", alpha=0.10, **lgbm_defaults)
+        self.lgbm_q90  = LGBMRegressor(objective="quantile", alpha=0.90, **lgbm_defaults)
+
+        rf_defaults = dict(
             n_estimators=self.n_estimators_rf,
             max_features=0.7,
             min_samples_leaf=5,
             random_state=self.seed,
             n_jobs=-1,
         )
+        rf_defaults.update(self.rf_params)
+        self.rf   = RandomForestRegressor(**rf_defaults)
         self.meta = Ridge(alpha=1.0)
 
     def fit(
@@ -183,9 +184,20 @@ class BballEnsemble:
     Top-level ensemble: trains home + away models, produces game-total predictions.
     """
 
-    def __init__(self) -> None:
-        self.home_model = StackedEnsemble(seed=SEED)
-        self.away_model = StackedEnsemble(seed=SEED)
+    def __init__(
+        self,
+        xgb_params:  Optional[dict] = None,
+        lgbm_params: Optional[dict] = None,
+        rf_params:   Optional[dict] = None,
+    ) -> None:
+        kw = dict(
+            seed=SEED,
+            xgb_params=xgb_params  or {},
+            lgbm_params=lgbm_params or {},
+            rf_params=rf_params    or {},
+        )
+        self.home_model = StackedEnsemble(**kw)
+        self.away_model = StackedEnsemble(**kw)
         self._calibration_scale: float = 1.0  # set during training
         self._league_home_bias: dict[str, float] = {}  # per-league mean home residual
         self._league_away_bias: dict[str, float] = {}  # per-league mean away residual

@@ -102,13 +102,23 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
         raise ValueError("Train or validation set is empty. Check season labels.")
 
     # Walk-forward CV (log fold scores, don't use for final model)
-    _walk_forward_cv(gold_df, TRAIN_SEASONS)
+    _walk_forward_cv(gold_df, TRAIN_SEASONS, xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
 
     # --- Final model ---
     X_train, y_home_train, y_away_train, _ = _prepare_xy(train_df, FEATURE_COLS)
     X_val,   y_home_val,   y_away_val,   _ = _prepare_xy(val_df,   FEATURE_COLS)
 
-    ensemble = BballEnsemble()
+    # Load tuned hyperparameters if available (produced by scripts/tune_hyperparams.py)
+    best_params_path = Path(settings.models_dir) / "best_params.json"
+    xgb_params = lgbm_params = rf_params = None
+    if best_params_path.exists():
+        best = json.loads(best_params_path.read_text())
+        xgb_params  = best.get("xgb_params")
+        lgbm_params = best.get("lgbm_params")
+        rf_params   = best.get("rf_params")
+        logger.info("Loaded tuned hyperparameters from {}", best_params_path)
+
+    ensemble = BballEnsemble(xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
     ensemble.fit(X_train, y_home_train, y_away_train, X_val, y_home_val, y_away_val)
 
     # Calibrate intervals on validation set
@@ -208,7 +218,13 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
 # Walk-forward CV (logging only — does not influence final model)
 # ---------------------------------------------------------------------------
 
-def _walk_forward_cv(gold_df: pd.DataFrame, train_seasons: list[str]) -> None:
+def _walk_forward_cv(
+    gold_df: pd.DataFrame,
+    train_seasons: list[str],
+    xgb_params: Optional[dict] = None,
+    lgbm_params: Optional[dict] = None,
+    rf_params: Optional[dict] = None,
+) -> None:
     """Run 2-fold walk-forward CV within train seasons and log MAE."""
     if "season" not in gold_df.columns:
         logger.info("No 'season' column — skipping walk-forward CV")
@@ -231,7 +247,7 @@ def _walk_forward_cv(gold_df: pd.DataFrame, train_seasons: list[str]) -> None:
         X_tr, y_h_tr, y_a_tr, _ = _prepare_xy(cv_train, FEATURE_COLS)
         X_vl, y_h_vl, y_a_vl, _ = _prepare_xy(cv_val,   FEATURE_COLS)
 
-        ens = BballEnsemble()
+        ens = BballEnsemble(xgb_params=xgb_params, lgbm_params=lgbm_params, rf_params=rf_params)
         ens.fit(X_tr, y_h_tr, y_a_tr, X_vl, y_h_vl, y_a_vl)
         preds = ens.predict(X_vl)
 
