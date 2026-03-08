@@ -140,12 +140,17 @@ def predict_today(
             for p in all_preds:
                 edge_str = f"  edge={p.edge:+.1f}" if p.edge is not None else ""
                 line_str = f"  line={p.book_total:.1f}" if p.book_total else "  (no line)  "
-                # Split: away score / home score  (match string is "away @ home")
-                split_str = f"  {p.model_away_mean:.1f} @ {p.model_home_mean:.1f}"
+                rec_str = f"  → {p.total_recommendation}" if p.total_recommendation else ""
+                # Split: away score / home score with per-team recommendation when available
+                if p.away_recommendation and p.home_recommendation:
+                    split_str = f"  {p.model_away_mean:.1f}({p.away_recommendation}) @ {p.model_home_mean:.1f}({p.home_recommendation})"
+                else:
+                    split_str = f"  {p.model_away_mean:.1f} @ {p.model_home_mean:.1f}"
                 typer.echo(
                     f"  [{p.league.upper():12s}] {p.match:42s}"
                     f"  total={p.model_total_mean:.1f}"
                     f"  [{p.model_total_p10:.0f}–{p.model_total_p90:.0f}]"
+                    f"{rec_str}"
                     f"{split_str}"
                     f"{line_str}{edge_str}"
                 )
@@ -231,10 +236,17 @@ def predict_game(
             raise typer.Exit(1)
 
         p = preds[0]
+        total_rec_str = f"  → {p.total_recommendation}" if p.total_recommendation else ""
+        if p.away_recommendation and p.home_recommendation:
+            split_str = f"{p.model_away_mean:.1f}({p.away_recommendation}) @ {p.model_home_mean:.1f}({p.home_recommendation})"
+        else:
+            split_str = f"{p.model_away_mean:.1f} @ {p.model_home_mean:.1f}"
         typer.echo(f"\n── Manual Prediction ─────────────────────────────────────────────")
         typer.echo(f"  [{league.upper():12s}]  {p.match}")
-        typer.echo(f"  Total:      {p.model_total_mean:.1f}  [{p.model_total_p10:.0f}–{p.model_total_p90:.0f}]")
-        typer.echo(f"  Split:      {p.model_away_mean:.1f} @ {p.model_home_mean:.1f}  (away @ home)")
+        typer.echo(f"  Total:      {p.model_total_mean:.1f}  [{p.model_total_p10:.0f}–{p.model_total_p90:.0f}]{total_rec_str}")
+        if p.book_total:
+            typer.echo(f"  Line:       {p.book_total:.1f}  (edge={p.edge:+.1f})")
+        typer.echo(f"  Split:      {split_str}  (away @ home)")
         typer.echo(f"  Confidence: {p.confidence:.1%}")
         if p.home_pts_l5:
             typer.echo(f"  Home L5:    scores {p.home_pts_l5:.1f},  allows {p.home_pts_allowed_l5:.1f}")
@@ -501,6 +513,130 @@ def update_actuals() -> None:
 
     df.to_csv(tracker_path, index=False)
     typer.echo(f"Updated {updated} rows with actuals.")
+
+
+# ---------------------------------------------------------------------------
+# update_biases
+# ---------------------------------------------------------------------------
+
+@app.command()
+def update_biases(
+    min_games: int = typer.Option(5, "--min-games", help="Minimum completed games per league before adjusting bias"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print adjustments without saving"),
+) -> None:
+    """
+    Update per-league bias corrections from live tracker results.
+
+    Reads completed games from the daily tracker, computes residual error
+    per league (actual - model, after existing bias correction), and patches
+    the running ensemble so future predictions are corrected without a full retrain.
+
+    Run after: python cli.py update-actuals
+    """
+    _init()
+    import json
+    from datetime import datetime
+    from pathlib import Path
+    import pandas as pd
+    from src.models.ensemble import BballEnsemble
+
+    tracker_path = settings.tracking_path
+    if not tracker_path.exists():
+        typer.echo("No tracker file found — run predict-today first.", err=True)
+        raise typer.Exit(1)
+
+    df = pd.read_csv(tracker_path)
+    filled = df[df["actual_total"].notna()].copy()
+
+    if filled.empty:
+        typer.echo("No completed games in tracker — run update-actuals first.")
+        raise typer.Exit(1)
+
+    # error = actual - model (positive = under-predicted, negative = over-predicted)
+    league_stats = (
+        filled.groupby("league")["error"]
+        .agg(mean_error="mean", games="count")
+        .reset_index()
+    )
+
+    typer.echo(f"\nTracker residuals ({len(filled)} completed games):")
+    typer.echo(f"{'League':<14} {'Games':>5}  {'Mean error':>10}  {'Direction':>12}")
+    typer.echo("─" * 50)
+    for _, row in league_stats.iterrows():
+        direction = "under-predicting" if row["mean_error"] > 0 else "over-predicting"
+        typer.echo(
+            f"  {row['league']:<12} {int(row['games']):>5}  {row['mean_error']:>+10.2f}  {direction}"
+        )
+
+    # Leagues with enough games to update
+    to_update = league_stats[league_stats["games"] >= min_games]
+    skipped = league_stats[league_stats["games"] < min_games]["league"].tolist()
+    if skipped:
+        typer.echo(f"\nSkipped (< {min_games} games): {', '.join(skipped)}")
+
+    if to_update.empty:
+        typer.echo(f"\nNo leagues have ≥ {min_games} completed games yet. Nothing updated.")
+        raise typer.Exit(0)
+
+    # Load ensemble and patch biases
+    ensemble = BballEnsemble.load()
+    log_entries = []
+
+    typer.echo(f"\nBias adjustments:")
+    typer.echo(f"{'League':<14} {'Old total bias':>14}  {'Adjustment':>10}  {'New total bias':>14}")
+    typer.echo("─" * 60)
+
+    for _, row in to_update.iterrows():
+        league = row["league"]
+        residual = float(row["mean_error"])
+
+        # Split residual equally between home and away sides
+        half = residual / 2
+
+        old_home = ensemble._league_home_bias.get(league, 0.0)
+        old_away = ensemble._league_away_bias.get(league, 0.0)
+        old_total = old_home + old_away
+
+        new_home = old_home + half
+        new_away = old_away + half
+        new_total = new_home + new_away
+
+        typer.echo(
+            f"  {league:<12} {old_total:>+14.3f}  {residual:>+10.3f}  {new_total:>+14.3f}"
+        )
+
+        if not dry_run:
+            ensemble._league_home_bias[league] = round(new_home, 4)
+            ensemble._league_away_bias[league] = round(new_away, 4)
+
+        log_entries.append({
+            "league": league,
+            "games_used": int(row["games"]),
+            "residual": round(residual, 4),
+            "old_home_bias": round(old_home, 4),
+            "old_away_bias": round(old_away, 4),
+            "new_home_bias": round(new_home, 4),
+            "new_away_bias": round(new_away, 4),
+        })
+
+    if dry_run:
+        typer.echo("\n[dry-run] No changes saved.")
+        return
+
+    ensemble.save()
+
+    # Persist log
+    log_path = Path(settings.models_dir) / "bias_update_log.json"
+    existing_log = json.loads(log_path.read_text()) if log_path.exists() else []
+    existing_log.append({
+        "timestamp": datetime.now().isoformat(),
+        "completed_games_in_tracker": len(filled),
+        "updates": log_entries,
+    })
+    log_path.write_text(json.dumps(existing_log, indent=2))
+
+    typer.echo(f"\nEnsemble updated and saved. Log → {log_path}")
+    typer.echo("Next predictions will use the adjusted biases automatically.")
 
 
 if __name__ == "__main__":

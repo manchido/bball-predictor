@@ -35,6 +35,9 @@ class PredictionResponse(BaseModel):
     away_pts_l5: Optional[float] = None        # away team avg points scored last 5 games
     home_pts_allowed_l5: Optional[float] = None  # home team avg points allowed last 5 games
     away_pts_allowed_l5: Optional[float] = None  # away team avg points allowed last 5 games
+    total_recommendation: Optional[str] = None  # "OVER" or "UNDER" vs book_total (None if no line)
+    home_recommendation: Optional[str] = None   # "OVER" or "UNDER" vs implied home line (book_total/2)
+    away_recommendation: Optional[str] = None   # "OVER" or "UNDER" vs implied away line (book_total/2)
 
 
 class TodayPredictionsResponse(BaseModel):

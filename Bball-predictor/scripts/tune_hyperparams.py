@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import optuna
+import pandas as pd
 import typer
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -36,14 +37,18 @@ from src.pipeline.silver_to_gold import load_gold
 from src.utils.config import settings
 from src.utils.logging import setup_logging, logger
 
-TRAIN_SEASONS = ["2023-24", "2024", "2024-25", "2025"]
-VAL_SEASONS   = ["2025-26", "2026"]
+TRAIN_SEASONS   = ["2023-24", "2024", "2024-25", "2025"]
+CURRENT_SEASONS = ["2025-26", "2026"]
+VAL_CUTOFF      = pd.Timestamp("2026-01-01")  # first half of current season → val
 SEED = settings.seed
 
 
 def _split(gold_df):
-    train = gold_df[gold_df["season"].isin(TRAIN_SEASONS)]
-    val   = gold_df[gold_df["season"].isin(VAL_SEASONS)]
+    gold_df = gold_df.copy()
+    gold_df["date"] = pd.to_datetime(gold_df["date"])
+    train   = gold_df[gold_df["season"].isin(TRAIN_SEASONS)]
+    current = gold_df[gold_df["season"].isin(CURRENT_SEASONS)]
+    val     = current[current["date"] < VAL_CUTOFF]
     return train, val
 
 
@@ -61,8 +66,19 @@ def _xy(df):
 def _fit_and_score(xgb_p: dict, lgbm_p: dict, rf_p: dict,
                    X_tr, y_h_tr, y_a_tr,
                    X_vl, y_h_vl, y_a_vl) -> float:
-    """Train a stacked ensemble with given params, return val total-MAE."""
+    """
+    Train a stacked ensemble with given params.
+
+    Returns a combined score:
+        per-side MAE  +  calibration penalty
+
+    Calibration penalty = 15 * |raw_coverage - 0.80| per side.
+    This prevents Optuna from finding params that nail MAE but produce
+    poorly-calibrated intervals (the problem from round 1 of tuning).
+    """
     total_mae = 0.0
+    total_cal_penalty = 0.0
+
     for y_tr, y_vl in [(y_h_tr, y_h_vl), (y_a_tr, y_a_vl)]:
         xgb  = XGBRegressor(**xgb_p)
         lgbm = LGBMRegressor(**lgbm_p)
@@ -72,6 +88,7 @@ def _fit_and_score(xgb_p: dict, lgbm_p: dict, rf_p: dict,
         lgbm.fit(X_tr, y_tr)
         rf.fit(X_tr, y_tr)
 
+        # Point prediction via stacked meta
         val_stack = np.column_stack([
             xgb.predict(X_vl),
             lgbm.predict(X_vl),
@@ -82,7 +99,23 @@ def _fit_and_score(xgb_p: dict, lgbm_p: dict, rf_p: dict,
         pred = meta.predict(val_stack)
         total_mae += mean_absolute_error(y_vl, pred)
 
-    return total_mae / 2  # average of home + away MAE
+        # Interval calibration: quantile LGBMs on train, evaluated on val
+        q10 = LGBMRegressor(objective="quantile", alpha=0.10, **lgbm_p)
+        q90 = LGBMRegressor(objective="quantile", alpha=0.90, **lgbm_p)
+        q10.fit(X_tr, y_tr)
+        q90.fit(X_tr, y_tr)
+        p10 = q10.predict(X_vl)
+        p90 = q90.predict(X_vl)
+
+        # Raw coverage on val — penalise deviation from 80% target
+        coverage = float(np.mean((y_vl >= p10) & (y_vl <= p90)))
+        total_cal_penalty += abs(coverage - 0.80)
+
+    mae_score = total_mae / 2
+    cal_score = total_cal_penalty / 2  # avg per side
+
+    # Weight: 1% calibration miss ≈ 0.15 MAE penalty
+    return mae_score + 15.0 * cal_score
 
 
 def make_objective(X_tr, y_h_tr, y_a_tr, X_vl, y_h_vl, y_a_vl):
@@ -163,6 +196,38 @@ def main(
         study_name="bball_hyperparams",
         sampler=optuna.samplers.TPESampler(seed=SEED),
     )
+
+    # Warm-start: seed with the previously-found best params so we explore
+    # from a known-good region rather than starting cold.
+    out_path = Path(settings.models_dir) / "best_params.json"
+    if out_path.exists():
+        prev = json.loads(out_path.read_text())
+        xp = prev.get("xgb_params", {})
+        lp = prev.get("lgbm_params", {})
+        rp = prev.get("rf_params", {})
+        seed_params = {
+            "xgb_n_est":    xp.get("n_estimators", 400),
+            "xgb_lr":       xp.get("learning_rate", 0.05),
+            "xgb_depth":    xp.get("max_depth", 5),
+            "xgb_sub":      xp.get("subsample", 0.8),
+            "xgb_col":      xp.get("colsample_bytree", 0.8),
+            "xgb_mcw":      xp.get("min_child_weight", 3),
+            "xgb_alpha":    xp.get("reg_alpha", 0.1),
+            "xgb_lambda":   xp.get("reg_lambda", 1.0),
+            "lgbm_n_est":   lp.get("n_estimators", 400),
+            "lgbm_lr":      lp.get("learning_rate", 0.05),
+            "lgbm_leaves":  lp.get("num_leaves", 63),
+            "lgbm_sub":     lp.get("subsample", 0.8),
+            "lgbm_col":     lp.get("colsample_bytree", 0.8),
+            "lgbm_mcs":     lp.get("min_child_samples", 10),
+            "lgbm_alpha":   lp.get("reg_alpha", 0.1),
+            "lgbm_lambda":  lp.get("reg_lambda", 1.0),
+            "rf_n_est":     rp.get("n_estimators", 300),
+            "rf_feat":      rp.get("max_features", 0.7),
+            "rf_msl":       rp.get("min_samples_leaf", 5),
+        }
+        study.enqueue_trial(seed_params)
+        print(f"Warm-starting from existing best_params.json")
 
     objective = make_objective(X_tr, y_h_tr, y_a_tr, X_vl, y_h_vl, y_a_vl)
 

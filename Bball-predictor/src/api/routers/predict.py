@@ -282,6 +282,15 @@ def _predict_games(
         odds_source = odds.odds_source if odds else None
         edge = round(p.total_mean - book_total, 2) if book_total else None
 
+        # Over/Under recommendations (only meaningful when a book line exists)
+        if book_total:
+            total_recommendation = "OVER" if p.total_mean > book_total else "UNDER"
+            half_line = book_total / 2
+            home_recommendation = "OVER" if p.home_pred_mean > half_line else "UNDER"
+            away_recommendation = "OVER" if p.away_pred_mean > half_line else "UNDER"
+        else:
+            total_recommendation = home_recommendation = away_recommendation = None
+
         import math
 
         def _safe(val, digits=1):
@@ -321,6 +330,9 @@ def _predict_games(
             away_pts_l5=away_pts_l5,
             home_pts_allowed_l5=home_pts_allowed_l5,
             away_pts_allowed_l5=away_pts_allowed_l5,
+            total_recommendation=total_recommendation,
+            home_recommendation=home_recommendation,
+            away_recommendation=away_recommendation,
         )
         predictions.append(pred_resp)
 

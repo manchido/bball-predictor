@@ -36,9 +36,11 @@ from src.utils.config import settings
 from src.utils.logging import logger
 
 
-TRAIN_SEASONS = ["2023-24", "2024", "2024-25", "2025"]  # both complete historical seasons
-VAL_SEASONS   = ["2025-26", "2026"]   # current season: meta-model + calibration
-TEST_SEASONS  = ["2025-26", "2026"]   # same as val — no separate holdout during live season
+TRAIN_SEASONS = ["2023-24", "2024", "2024-25", "2025"]  # complete historical seasons
+CURRENT_SEASONS = ["2025-26", "2026"]  # ongoing season — split by date below
+# Within the current season: first half = val (meta-model, calibration, bias correction)
+#                            second half = test (true holdout — never used during training)
+VAL_CUTOFF = pd.Timestamp("2026-01-01")
 
 
 def _prepare_xy(
@@ -82,16 +84,18 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
     gold_df = gold_df.copy()
     gold_df["date"] = pd.to_datetime(gold_df["date"])
 
-    # Split by season label or by year
+    # Split: train = historical seasons, val/test = date-split within current season
     if "season" in gold_df.columns:
-        train_df = gold_df[gold_df["season"].isin(TRAIN_SEASONS)]
-        val_df   = gold_df[gold_df["season"].isin(VAL_SEASONS)]
-        test_df  = gold_df[gold_df["season"].isin(TEST_SEASONS)]
+        train_df  = gold_df[gold_df["season"].isin(TRAIN_SEASONS)]
+        current   = gold_df[gold_df["season"].isin(CURRENT_SEASONS)]
+        val_df    = current[current["date"] < VAL_CUTOFF]
+        test_df   = current[current["date"] >= VAL_CUTOFF]
     else:
         # Fallback: split by calendar year
         train_df = gold_df[gold_df["date"].dt.year.isin([2023, 2024])]
-        val_df   = gold_df[gold_df["date"].dt.year == 2025]
-        test_df  = gold_df[gold_df["date"].dt.year == 2026]
+        current  = gold_df[gold_df["date"].dt.year.isin([2025, 2026])]
+        val_df   = current[current["date"] < VAL_CUTOFF]
+        test_df  = current[current["date"] >= VAL_CUTOFF]
 
     logger.info(
         "Split sizes — train: {}, val: {}, test: {}",
@@ -156,15 +160,12 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
         test_total_p90  = np.array([p.total_p90  for p in test_preds])
         test_actuals    = y_home_test + y_away_test
 
-        # Calibrated intervals for test
-        half_width = (test_total_p90 - test_total_p10) / 2 * scale
-        cal_p10 = test_total_mean - half_width
-        cal_p90 = test_total_mean + half_width
-
         mae  = float(mean_absolute_error(test_actuals, test_total_mean))
         rmse = float(np.sqrt(mean_squared_error(test_actuals, test_total_mean)))
+        # test_total_p10/p90 already have _calibration_scale applied by ensemble.predict().
+        # Pass scale_factor=1.0 to avoid double-scaling the intervals.
         cal_report = report_calibration(
-            test_total_mean, test_total_p10, test_total_p90, test_actuals, scale
+            test_total_mean, test_total_p10, test_total_p90, test_actuals, 1.0
         )
 
         metrics["game_total_MAE"]   = round(mae, 4)
@@ -186,14 +187,23 @@ def train(gold_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
             metrics["per_league_mae"] = per_league["mae"].to_dict()
             logger.info("Per-league test MAE:\n{}", per_league.to_string())
 
-        # Edge tracking (requires book_total column)
+        # Edge tracking — only for games that have a real book total
         if "book_total" in test_df.columns:
-            book = test_df["book_total"].fillna(0).values
-            edge = test_total_mean - book
-            metrics["mean_edge"] = round(float(np.mean(edge)), 4)
-            # Hit rate: model was on correct side of the closing line
-            hit = (edge > 0) == (test_actuals > book)
-            metrics["edge_hit_rate"] = round(float(np.mean(hit)), 4)
+            test_df_r = test_df.reset_index(drop=True)
+            mask = test_df_r["book_total"].notna() & (test_df_r["book_total"] > 0)
+            n_book = int(mask.sum())
+            if n_book > 0:
+                book_vals = test_df_r.loc[mask, "book_total"].values
+                pred_vals = test_total_mean[mask.values]
+                act_vals  = test_actuals[mask.values]
+                edge = pred_vals - book_vals
+                metrics["mean_edge"] = round(float(np.mean(edge)), 4)
+                hit = (edge > 0) == (act_vals > book_vals)
+                metrics["edge_hit_rate"] = round(float(np.mean(hit)), 4)
+                metrics["book_total_n"] = n_book
+                logger.info("Edge metrics computed on {} games with book_total", n_book)
+            else:
+                logger.warning("book_total column present but all NaN — skipping edge metrics")
         else:
             logger.warning("book_total not in test set — skipping edge metrics")
 
