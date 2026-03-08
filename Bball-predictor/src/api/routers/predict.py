@@ -282,15 +282,6 @@ def _predict_games(
         odds_source = odds.odds_source if odds else None
         edge = round(p.total_mean - book_total, 2) if book_total else None
 
-        # Over/Under recommendations (only meaningful when a book line exists)
-        if book_total:
-            total_recommendation = "OVER" if p.total_mean > book_total else "UNDER"
-            half_line = book_total / 2
-            home_recommendation = "OVER" if p.home_pred_mean > half_line else "UNDER"
-            away_recommendation = "OVER" if p.away_pred_mean > half_line else "UNDER"
-        else:
-            total_recommendation = home_recommendation = away_recommendation = None
-
         import math
 
         def _safe(val, digits=1):
@@ -305,6 +296,26 @@ def _predict_games(
         away_pts_l5         = _safe(feature_row.get("away_points_l5"))
         home_pts_allowed_l5 = _safe(feature_row.get("home_opp_points_l5"))
         away_pts_allowed_l5 = _safe(feature_row.get("away_opp_points_l5"))
+
+        # Over/Under recommendations — always shown.
+        # When a book line exists: compare model vs book line (actionable for betting).
+        # When no book line: compare model vs teams' rolling L5 scoring average (trend signal).
+        if book_total:
+            total_recommendation = "OVER" if p.total_mean > book_total else "UNDER"
+            half_line = book_total / 2
+            home_recommendation = "OVER" if p.home_pred_mean > half_line else "UNDER"
+            away_recommendation = "OVER" if p.away_pred_mean > half_line else "UNDER"
+        else:
+            # Fallback: compare model prediction vs each team's recent scoring average
+            h_ref = feature_row.get("home_points_l5") or 0.0
+            a_ref = feature_row.get("away_points_l5") or 0.0
+            rolling_total = h_ref + a_ref
+            if rolling_total > 0:
+                total_recommendation = "OVER" if p.total_mean > rolling_total else "UNDER"
+                home_recommendation = "OVER" if p.home_pred_mean > h_ref else "UNDER"
+                away_recommendation = "OVER" if p.away_pred_mean > a_ref else "UNDER"
+            else:
+                total_recommendation = home_recommendation = away_recommendation = None
 
         match_str = f"{game['away_team']} @ {game['home_team']}"
         pred_resp = PredictionResponse(
