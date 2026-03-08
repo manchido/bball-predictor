@@ -75,11 +75,25 @@ def train(
 @app.command()
 def predict_today(
     leagues: Optional[list[str]] = typer.Option(None, "--league", help="League(s) to predict (repeat for multiple)"),
+    for_date: Optional[str] = typer.Option(None, "--date", help="Date to predict (YYYY-MM-DD, 'today', or 'tomorrow'). Default: today."),
     output_json: bool = typer.Option(False, "--json", help="Output raw JSON"),
 ) -> None:
-    """Fetch today's games + odds and output predictions."""
+    """Fetch scheduled games for a date and output predictions (default: today)."""
     _init()
     logger.info("CLI: predict_today")
+
+    # Resolve target date
+    from datetime import timedelta
+    if for_date is None or for_date.lower() == "today":
+        target_date = date.today()
+    elif for_date.lower() == "tomorrow":
+        target_date = date.today() + timedelta(days=1)
+    else:
+        try:
+            target_date = date.fromisoformat(for_date)
+        except ValueError:
+            typer.echo(f"ERROR: Invalid date '{for_date}'. Use YYYY-MM-DD, 'today', or 'tomorrow'.", err=True)
+            raise typer.Exit(1)
 
     active_leagues = leagues or [
         "euroleague", "eurocup", "acb", "bsl", "bbl",
@@ -114,7 +128,7 @@ def predict_today(
 
         all_preds = []
         for league in active_leagues:
-            games = await scraper.fetch_today(league)
+            games = await scraper.fetch_today(league, target_date)
             if not games:
                 continue
             injury_data, odds_records = await asyncio.gather(
@@ -133,15 +147,18 @@ def predict_today(
             )
             all_preds.extend(preds)
 
+        label = "Tomorrow's" if target_date == date.today() + timedelta(days=1) else f"{target_date}"
+        if target_date == date.today():
+            label = "Today's"
+
         if output_json:
             typer.echo(json.dumps([p.model_dump() for p in all_preds], indent=2, default=str))
         else:
-            typer.echo(f"\n── Today's Predictions ({date.today()}) ──────────────────────────────────────────")
+            typer.echo(f"\n── {label} Predictions ({target_date}) ──────────────────────────────────────────")
             for p in all_preds:
                 edge_str = f"  edge={p.edge:+.1f}" if p.edge is not None else ""
                 line_str = f"  line={p.book_total:.1f}" if p.book_total else "  (no line)  "
                 rec_str = f"  → {p.total_recommendation}" if p.total_recommendation else ""
-                # Split: away score / home score with per-team recommendation when available
                 if p.away_recommendation and p.home_recommendation:
                     split_str = f"  {p.model_away_mean:.1f}({p.away_recommendation}) @ {p.model_home_mean:.1f}({p.home_recommendation})"
                 else:
@@ -158,6 +175,76 @@ def predict_today(
             typer.echo(f"  {len(all_preds)} games predicted  (split shown as: away @ home)\n")
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# predictions_history  (view previously predicted games from tracker)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def predictions_history(
+    for_date: Optional[str] = typer.Option(None, "--date", help="Date to view (YYYY-MM-DD or 'yesterday'). Default: yesterday."),
+    league: Optional[str] = typer.Option(None, "--league", help="Filter by league"),
+    n: int = typer.Option(50, "--n", help="Max rows to show"),
+) -> None:
+    """Show previously predicted games from the tracker CSV."""
+    import csv
+    from datetime import timedelta
+    from src.utils.config import settings
+
+    if for_date is None or for_date.lower() == "yesterday":
+        target_date = date.today() - timedelta(days=1)
+    elif for_date.lower() == "today":
+        target_date = date.today()
+    else:
+        try:
+            target_date = date.fromisoformat(for_date)
+        except ValueError:
+            typer.echo(f"ERROR: Invalid date '{for_date}'. Use YYYY-MM-DD or 'yesterday'.", err=True)
+            raise typer.Exit(1)
+
+    tracker = settings.tracking_path
+    if not tracker.exists():
+        typer.echo("No predictions tracker found. Run predict-today first.")
+        raise typer.Exit(0)
+
+    rows = []
+    with open(tracker, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                row_date = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_date != target_date:
+                continue
+            if league and row.get("league", "").lower() != league.lower():
+                continue
+            rows.append(row)
+
+    if not rows:
+        typer.echo(f"No predictions found for {target_date}" + (f" ({league})" if league else "") + ".")
+        raise typer.Exit(0)
+
+    # Deduplicate by game_id (keep last prediction for each game)
+    seen: dict[str, dict] = {}
+    for row in rows:
+        seen[row.get("game_id", row["match"])] = row
+    rows = list(seen.values())[:n]
+
+    typer.echo(f"\n── Predictions for {target_date} ({len(rows)} games) ──────────────────────────────")
+    for row in rows:
+        actual = row.get("actual_total", "")
+        error  = row.get("error", "")
+        result_str = f"  actual={actual}  err={error}" if actual else "  (no result yet)"
+        book_str = f"  line={row['book_total']}" if row.get("book_total") else ""
+        typer.echo(
+            f"  [{row.get('league','').upper():12s}] {row.get('match',''):42s}"
+            f"  total={row.get('model_total_mean',''):>6}"
+            f"  [{row.get('model_total_p10',''):>3}–{row.get('model_total_p90',''):>3}]"
+            f"{book_str}{result_str}"
+        )
+    typer.echo(f"──────────────────────────────────────────────────────────────────────────────────\n")
 
 
 # ---------------------------------------------------------------------------

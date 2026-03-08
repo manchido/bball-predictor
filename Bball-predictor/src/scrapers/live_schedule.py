@@ -67,6 +67,7 @@ _EL_CURRENT: dict[str, tuple[str, str, str]] = {
 
 _SF_CURRENT: dict[str, tuple[int, int, str]] = {
     # league → (tournament_id, season_id, season_label)
+    "acb":    (264,   80922, "2025-26"),
     "bbl":    (227,   79994, "2025-26"),
     "bsl":    (519,   81036, "2025-26"),
     "nba":    (132,   80229, "2025-26"),
@@ -101,24 +102,22 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | lis
 
 
 class LiveScheduleFetcher:
-    """Fetch today's scheduled games using official per-league APIs."""
+    """Fetch scheduled games for any date using official per-league APIs."""
 
-    async def fetch_today(self, league: str) -> list[dict]:
-        """Return game-dicts for today's scheduled / live games in `league`."""
-        today = date.today()
+    async def fetch_today(self, league: str, target_date: date | None = None) -> list[dict]:
+        """Return game-dicts for `target_date` (defaults to today) in `league`."""
+        target_date = target_date or date.today()
         try:
             if league in _EL_CURRENT:
-                return await self._fetch_el_today(league, today)
+                return await self._fetch_el_today(league, target_date)
             if league in _SF_CURRENT:
-                return await self._fetch_sf_today(league, today)
-            if league == "acb":
-                return await self._fetch_acb_today(today)
+                return await self._fetch_sf_today(league, target_date)
         except Exception:
             logger.warning("LiveScheduleFetcher primary source failed for league={}, trying fallbacks", league)
             # ESPN fallback for NBA when SofaScore is rate-limited
             if league == "nba":
                 try:
-                    return await self._fetch_espn_nba_today(today)
+                    return await self._fetch_espn_nba_today(target_date)
                 except Exception:
                     logger.exception("ESPN NBA fallback also failed")
         return []
@@ -173,13 +172,20 @@ class LiveScheduleFetcher:
             try:
                 data = await _get_json(c, date_url)
                 events = data.get("events", [])
-                results = [
-                    _build_game_dict(today, e["homeTeam"]["name"], e["awayTeam"]["name"], league, season_label)
-                    for e in events
-                    if e.get("tournament", {}).get("uniqueTournament", {}).get("id") == t_id
-                    and e.get("homeTeam", {}).get("name")
-                    and e.get("awayTeam", {}).get("name")
-                ]
+                results = []
+                for e in events:
+                    if e.get("tournament", {}).get("uniqueTournament", {}).get("id") != t_id:
+                        continue
+                    if not e.get("homeTeam", {}).get("name") or not e.get("awayTeam", {}).get("name"):
+                        continue
+                    # SofaScore's date endpoint includes events from surrounding days;
+                    # verify the actual start timestamp falls on the requested date.
+                    ts = e.get("startTimestamp", 0)
+                    if ts and datetime.fromtimestamp(ts).date() != today:
+                        continue
+                    results.append(
+                        _build_game_dict(today, e["homeTeam"]["name"], e["awayTeam"]["name"], league, season_label)
+                    )
                 logger.info("LiveScheduleFetcher [{}]: {} games today (date endpoint)", league, len(results))
                 return results
             except httpx.HTTPStatusError as e:

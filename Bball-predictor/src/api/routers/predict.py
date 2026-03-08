@@ -354,11 +354,18 @@ def _predict_games(
 
 
 def _append_tracker(pred: PredictionResponse, game: dict) -> None:
-    """Append prediction to daily_tracker.csv."""
+    """Append prediction to daily_tracker.csv, skipping if game_id already exists."""
     import csv
     tracker = settings.tracking_path
     tracker.parent.mkdir(parents=True, exist_ok=True)
     write_header = not tracker.exists()
+
+    # Skip duplicate entries (same game predicted multiple times in one day)
+    if tracker.exists():
+        with open(tracker, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("game_id") == pred.game_id:
+                    return
 
     fields = [
         "date", "league", "match", "game_id",
