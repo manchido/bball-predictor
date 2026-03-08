@@ -59,6 +59,16 @@
     }
     .league-row:hover { background: rgba(255,255,255,0.04); }
 
+    /* Date nav button */
+    .date-btn {
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    /* Date picker dark styling */
+    input[type="date"] {
+      color-scheme: dark;
+    }
+
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: #111; }
     ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
@@ -69,7 +79,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useCallback, useMemo } = React;
+const { useState, useCallback, useMemo, useEffect } = React;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -93,11 +103,43 @@ const LEAGUE_META = {
   hung:       { name: 'Hungary',      color: '#84CC16' },
 };
 
-// Scoring form grade — relative to the model's prediction for that team side
-// pct = team_pts_l5 / model_side_pred
-// > 1.06 → scoring above what model expects → "Hot"
-// < 0.94 → scoring below                   → "Cold"
-// otherwise                                 → "On Track"
+// ── Date helpers ─────────────────────────────────────────────────────────────
+
+function localDateStr(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  // Use local date parts to avoid UTC shift
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function formatDisplayDate(isoStr) {
+  // Parse as local date (add T12:00 to avoid UTC boundary shift)
+  return new Date(isoStr + 'T12:00:00').toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
+}
+
+function formatShortDate(isoStr) {
+  return new Date(isoStr + 'T12:00:00').toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric',
+  });
+}
+
+function dateLabel(isoStr) {
+  const today    = localDateStr(0);
+  const tomorrow = localDateStr(1);
+  const yest     = localDateStr(-1);
+  if (isoStr === today)    return "Today's";
+  if (isoStr === tomorrow) return "Tomorrow's";
+  if (isoStr === yest)     return "Yesterday's";
+  return formatShortDate(isoStr) + "'s";
+}
+
+// ── Scoring form helpers ─────────────────────────────────────────────────────
+
 function scoringFormGrade(ptsL5, modelPred) {
   if (!ptsL5 || !modelPred) return null;
   const ratio = ptsL5 / modelPred;
@@ -106,8 +148,6 @@ function scoringFormGrade(ptsL5, modelPred) {
   return                     { label: 'On Track ✓',  color: '#34D399', bg: '#052e16' };
 }
 
-// Defensive form grade — relative to the model's prediction for the opponent side
-// ptsAllowed vs opponent's model prediction: if you allow less than expected → Stingy
 function defFormGrade(ptsAllowedL5, oppModelPred) {
   if (!ptsAllowedL5 || !oppModelPred) return null;
   const ratio = ptsAllowedL5 / oppModelPred;
@@ -136,22 +176,99 @@ function formatDate(d) {
 function awayTeam(match) { return match.split(' @ ')[0] ?? match; }
 function homeTeam(match) { return match.split(' @ ')[1] ?? match; }
 
-function todayStr() {
-  return new Date().toLocaleDateString('en-US', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  });
-}
-
-// Range bar context helpers
 function barContext(game) {
   const half = (game.model_total_p90 - game.model_total_p10) / 2;
   const ctx  = Math.max(30, half * 1.4);
   return { lo: game.model_total_mean - ctx, hi: game.model_total_mean + ctx };
 }
 
-// ── Sub-components ───────────────────────────────────────────────────────────
+// ── DateNav component ─────────────────────────────────────────────────────────
 
-// ScoringForm: replaces pace — shows L5 scoring avg + form grade relative to model prediction
+function DateNav({ selectedDate, onChange }) {
+  const today    = localDateStr(0);
+  const tomorrow = localDateStr(1);
+  const yest     = localDateStr(-1);
+  const maxDate  = localDateStr(2); // allow up to 2 days ahead
+
+  function shift(n) {
+    const d = new Date(selectedDate + 'T12:00:00');
+    d.setDate(d.getDate() + n);
+    const newStr = [
+      d.getFullYear(),
+      String(d.getMonth() + 1).padStart(2, '0'),
+      String(d.getDate()).padStart(2, '0'),
+    ].join('-');
+    if (newStr <= maxDate) onChange(newStr);
+  }
+
+  const btnBase = "date-btn px-3.5 py-2 rounded-xl text-xs font-bold border transition-all";
+
+  function navBtn(label, targetDate, emoji) {
+    const active = selectedDate === targetDate;
+    return (
+      <button
+        key={label}
+        onClick={() => onChange(targetDate)}
+        className={btnBase}
+        style={active
+          ? { background: '#1e3a5f', color: '#60a5fa', borderColor: '#2563eb' }
+          : { background: 'transparent', color: '#6B7280', borderColor: '#1e2d3d' }
+        }
+      >
+        {emoji && <span className="mr-1">{emoji}</span>}{label}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-5">
+      {/* Arrow back */}
+      <button
+        onClick={() => shift(-1)}
+        className={btnBase}
+        style={{ color: '#6B7280', borderColor: '#1e2d3d', background: 'transparent', padding: '8px 12px' }}
+        title="Previous day"
+      >
+        ←
+      </button>
+
+      {navBtn('Yesterday', yest, '📋')}
+      {navBtn('Today', today, '🏀')}
+      {navBtn('Tomorrow', tomorrow, '🔮')}
+
+      {/* Arrow forward (limited to maxDate) */}
+      <button
+        onClick={() => shift(1)}
+        disabled={selectedDate >= maxDate}
+        className={btnBase}
+        style={{
+          color: selectedDate >= maxDate ? '#2a3a4a' : '#6B7280',
+          borderColor: '#1e2d3d',
+          background: 'transparent',
+          padding: '8px 12px',
+          cursor: selectedDate >= maxDate ? 'not-allowed' : 'pointer',
+        }}
+        title="Next day"
+      >
+        →
+      </button>
+
+      {/* Date picker */}
+      <input
+        type="date"
+        value={selectedDate}
+        min="2024-01-01"
+        max={maxDate}
+        onChange={e => e.target.value && onChange(e.target.value)}
+        className="date-btn bg-transparent border border-[#1e2d3d] rounded-xl px-3 py-2 text-xs text-gray-400 focus:outline-none focus:border-blue-600"
+        title="Pick a specific date"
+      />
+    </div>
+  );
+}
+
+// ── ScoringForm ───────────────────────────────────────────────────────────────
+
 function ScoringForm({ ptsL5, ptsAllowedL5, modelSidePred, oppModelPred, side }) {
   const isHome   = side === 'home';
   const offGrade = scoringFormGrade(ptsL5, modelSidePred);
@@ -163,50 +280,51 @@ function ScoringForm({ ptsL5, ptsAllowedL5, modelSidePred, oppModelPred, side })
 
   return (
     <div className={`mt-2.5 space-y-1.5 ${isHome ? 'text-right' : ''}`}>
-
-      {/* Offense row */}
       {ptsL5 && (
         <div className={`flex items-center gap-1.5 ${isHome ? 'justify-end' : ''}`}>
           <span className="text-[9px] text-gray-500">Scores</span>
           <span className="text-[11px] font-bold text-gray-200 tabular-nums">{ptsL5.toFixed(1)}</span>
           {offGrade && (
-            <span
-              className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
-              style={{ color: offGrade.color, background: offGrade.bg }}
-            >
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
+              style={{ color: offGrade.color, background: offGrade.bg }}>
               {offGrade.label}
             </span>
           )}
         </div>
       )}
-
-      {/* Defense row */}
       {ptsAllowedL5 && (
         <div className={`flex items-center gap-1.5 ${isHome ? 'justify-end' : ''}`}>
           <span className="text-[9px] text-gray-500">Allows</span>
           <span className="text-[11px] font-bold text-gray-200 tabular-nums">{ptsAllowedL5.toFixed(1)}</span>
           {defGrade && (
-            <span
-              className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
-              style={{ color: defGrade.color, background: defGrade.bg }}
-            >
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md"
+              style={{ color: defGrade.color, background: defGrade.bg }}>
               {defGrade.label}
             </span>
           )}
         </div>
       )}
-
     </div>
   );
 }
 
-function GameCard({ game, league, index }) {
+// ── GameCard ─────────────────────────────────────────────────────────────────
+
+function GameCard({ game, league, index, isPast }) {
   const color  = leagueColor(league);
   const { lo, hi } = barContext(game);
   const rangeLeft  = Math.max(0, ((game.model_total_p10 - lo) / (hi - lo)) * 100);
   const rangeWidth = Math.min(100, ((game.model_total_p90 - game.model_total_p10) / (hi - lo)) * 100);
   const meanPct    = ((game.model_total_mean - lo) / (hi - lo)) * 100;
   const confColor  = confidenceColor(game.confidence);
+
+  const hasActual = game.actual_total != null && game.actual_total > 0;
+  const errColor  = hasActual
+    ? (Math.abs(game.result_error ?? 0) < 8 ? '#34D399' : Math.abs(game.result_error ?? 0) < 16 ? '#FBBF24' : '#F87171')
+    : null;
+
+  // For past games from tracker, home/away means may be 0; hide them in that case
+  const showTeamScores = game.model_home_mean > 0 && game.model_away_mean > 0;
 
   return (
     <div
@@ -219,17 +337,12 @@ function GameCard({ game, league, index }) {
       }}
     >
       {/* Top accent bar */}
-      <div
-        className="h-0.5 w-full"
-        style={{ background: `linear-gradient(90deg, ${color}, transparent)` }}
-      />
+      <div className="h-0.5 w-full" style={{ background: `linear-gradient(90deg, ${color}, transparent)` }} />
 
       {/* Header: league badge + date */}
       <div className="flex items-center justify-between px-4 pt-3 pb-2">
-        <span
-          className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md"
-          style={{ background: color + '22', color }}
-        >
+        <span className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md"
+          style={{ background: color + '22', color }}>
           {leagueName(league)}
         </span>
         <span className="text-[10px] text-gray-600">{formatDate(game.date)}</span>
@@ -245,16 +358,29 @@ function GameCard({ game, league, index }) {
             <div className="text-xs font-semibold text-gray-300 truncate leading-snug" title={awayTeam(game.match)}>
               {awayTeam(game.match)}
             </div>
-            <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
-              {game.model_away_mean.toFixed(1)}
-            </div>
-            <ScoringForm
-              ptsL5={game.away_pts_l5}
-              ptsAllowedL5={game.away_pts_allowed_l5}
-              modelSidePred={game.model_away_mean}
-              oppModelPred={game.model_home_mean}
-              side="away"
-            />
+            {showTeamScores && (
+              <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
+                {game.model_away_mean.toFixed(1)}
+                {game.away_recommendation && (
+                  <span className="ml-1.5 text-[11px] font-bold px-1.5 py-0.5 rounded-md align-middle"
+                    style={{
+                      background: game.away_recommendation === 'OVER' ? '#14532d' : '#450a0a',
+                      color:      game.away_recommendation === 'OVER' ? '#4ade80' : '#f87171',
+                    }}>
+                    {game.away_recommendation}
+                  </span>
+                )}
+              </div>
+            )}
+            {showTeamScores && (
+              <ScoringForm
+                ptsL5={game.away_pts_l5}
+                ptsAllowedL5={game.away_pts_allowed_l5}
+                modelSidePred={game.model_away_mean}
+                oppModelPred={game.model_home_mean}
+                side="away"
+              />
+            )}
           </div>
 
           {/* VS divider */}
@@ -269,16 +395,29 @@ function GameCard({ game, league, index }) {
             <div className="text-xs font-semibold text-gray-300 truncate leading-snug" title={homeTeam(game.match)}>
               {homeTeam(game.match)}
             </div>
-            <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
-              {game.model_home_mean.toFixed(1)}
-            </div>
-            <ScoringForm
-              ptsL5={game.home_pts_l5}
-              ptsAllowedL5={game.home_pts_allowed_l5}
-              modelSidePred={game.model_home_mean}
-              oppModelPred={game.model_away_mean}
-              side="home"
-            />
+            {showTeamScores && (
+              <div className="text-3xl font-black mt-1.5 tabular-nums leading-none" style={{ color }}>
+                {game.home_recommendation && (
+                  <span className="mr-1.5 text-[11px] font-bold px-1.5 py-0.5 rounded-md align-middle"
+                    style={{
+                      background: game.home_recommendation === 'OVER' ? '#14532d' : '#450a0a',
+                      color:      game.home_recommendation === 'OVER' ? '#4ade80' : '#f87171',
+                    }}>
+                    {game.home_recommendation}
+                  </span>
+                )}
+                {game.model_home_mean.toFixed(1)}
+              </div>
+            )}
+            {showTeamScores && (
+              <ScoringForm
+                ptsL5={game.home_pts_l5}
+                ptsAllowedL5={game.home_pts_allowed_l5}
+                modelSidePred={game.model_home_mean}
+                oppModelPred={game.model_away_mean}
+                side="home"
+              />
+            )}
           </div>
 
         </div>
@@ -296,6 +435,15 @@ function GameCard({ game, league, index }) {
                 {game.model_total_mean.toFixed(1)}
               </span>
               <span className="text-xs text-gray-500">pts</span>
+              {game.total_recommendation && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                  style={{
+                    background: game.total_recommendation === 'OVER' ? '#14532d' : '#450a0a',
+                    color:      game.total_recommendation === 'OVER' ? '#4ade80' : '#f87171',
+                  }}>
+                  {game.total_recommendation}
+                </span>
+              )}
             </div>
           </div>
           <div className="text-right">
@@ -313,104 +461,104 @@ function GameCard({ game, league, index }) {
 
         {/* Range bar */}
         <div className="mt-2 relative h-1 bg-gray-800 rounded-full overflow-hidden">
-          <div
-            className="absolute h-full rounded-full"
+          <div className="absolute h-full rounded-full"
             style={{
               left: `${rangeLeft}%`,
               width: `${rangeWidth}%`,
               background: `linear-gradient(90deg, ${color}55, ${color})`,
             }}
           />
-          {/* Mean marker */}
-          <div
-            className="absolute top-0 h-full w-0.5 bg-white rounded-full"
+          <div className="absolute top-0 h-full w-0.5 bg-white rounded-full"
             style={{ left: `${meanPct}%` }}
           />
         </div>
       </div>
 
+      {/* ── Actual result (past games) ── */}
+      {hasActual && (
+        <div className="mx-4 py-2.5 border-t border-gray-800/60 flex items-center justify-between">
+          <div>
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">Actual Total</div>
+            <div className="text-xl font-black tabular-nums" style={{ color: errColor }}>
+              {game.actual_total}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">Error</div>
+            <div className="text-sm font-bold tabular-nums" style={{ color: errColor }}>
+              {game.result_error != null
+                ? (game.result_error > 0 ? '+' : '') + game.result_error.toFixed(1) + ' pts'
+                : '—'
+              }
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Confidence + Edge ── */}
       <div className="px-4 pb-4 space-y-2">
-
-        {/* Confidence bar */}
         <div className="flex items-center gap-2">
           <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider w-16 shrink-0">
             Confidence
           </span>
           <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className="h-full rounded-full conf-fill"
+            <div className="h-full rounded-full conf-fill"
               style={{
                 width: `${(game.confidence * 100).toFixed(0)}%`,
                 background: `linear-gradient(90deg, ${confColor}88, ${confColor})`,
               }}
             />
           </div>
-          <span
-            className="text-[10px] font-bold w-7 text-right tabular-nums"
-            style={{ color: confColor }}
-          >
+          <span className="text-[10px] font-bold w-7 text-right tabular-nums" style={{ color: confColor }}>
             {(game.confidence * 100).toFixed(0)}%
           </span>
         </div>
 
-        {/* Edge vs book line */}
         {game.edge !== null && game.book_total && (
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider w-16 shrink-0">
               vs Line
             </span>
-            <span
-              className="text-xs font-bold"
-              style={{ color: game.edge > 0 ? '#34D399' : '#F87171' }}
-            >
+            <span className="text-xs font-bold" style={{ color: game.edge > 0 ? '#34D399' : '#F87171' }}>
               {game.edge > 0 ? '↑' : '↓'} {game.edge > 0 ? '+' : ''}{game.edge.toFixed(1)} pts
             </span>
-            <span className="text-[9px] text-gray-600">
-              (line {game.book_total.toFixed(1)})
-            </span>
+            <span className="text-[9px] text-gray-600">(line {game.book_total.toFixed(1)})</span>
           </div>
         )}
-
       </div>
     </div>
   );
 }
 
-function LeagueAccordion({ league, games, isOpen, onToggle }) {
-  const color   = leagueColor(league);
+// ── LeagueAccordion ───────────────────────────────────────────────────────────
+
+function LeagueAccordion({ league, games, isOpen, onToggle, isPast }) {
+  const color    = leagueColor(league);
   const avgTotal = (games.reduce((s, g) => s + g.model_total_mean, 0) / games.length).toFixed(1);
   const minTotal = Math.round(Math.min(...games.map(g => g.model_total_p10)));
   const maxTotal = Math.round(Math.max(...games.map(g => g.model_total_p90)));
 
+  // For past games: summarise accuracy
+  const gamesWithActual = games.filter(g => g.actual_total != null && g.actual_total > 0);
+  const avgError = gamesWithActual.length > 0
+    ? gamesWithActual.reduce((s, g) => s + Math.abs(g.result_error ?? 0), 0) / gamesWithActual.length
+    : null;
+
   return (
-    <div
-      className="rounded-2xl overflow-hidden mb-3"
-      style={{ border: '1px solid #1e2d3d' }}
-    >
-      {/* ── League header row (click to toggle) ── */}
-      <div
-        className="league-row flex items-center gap-4 px-5 py-4 rounded-2xl"
+    <div className="rounded-2xl overflow-hidden mb-3" style={{ border: '1px solid #1e2d3d' }}>
+      <div className="league-row flex items-center gap-4 px-5 py-4 rounded-2xl"
         style={{ borderLeft: `3px solid ${color}` }}
-        onClick={onToggle}
-        role="button"
-        aria-expanded={isOpen}
-      >
-        {/* Dot + name */}
+        onClick={onToggle} role="button" aria-expanded={isOpen}>
+
         <div className="flex items-center gap-2.5 min-w-0 flex-1">
           <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
           <span className="font-black text-sm text-white tracking-wide">{leagueName(league)}</span>
-
-          {/* Game count badge */}
-          <span
-            className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0"
-            style={{ background: color + '22', color }}
-          >
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0"
+            style={{ background: color + '22', color }}>
             {games.length} game{games.length !== 1 ? 's' : ''}
           </span>
         </div>
 
-        {/* Stats summary — hidden on small screens */}
         <div className="hidden sm:flex items-center gap-6 text-xs text-gray-500 shrink-0">
           <div className="text-center">
             <div className="text-[9px] font-bold uppercase tracking-wider text-gray-600 mb-0.5">Avg Total</div>
@@ -420,23 +568,27 @@ function LeagueAccordion({ league, games, isOpen, onToggle }) {
             <div className="text-[9px] font-bold uppercase tracking-wider text-gray-600 mb-0.5">Range</div>
             <div className="font-bold tabular-nums" style={{ color: color + 'cc' }}>{minTotal}–{maxTotal}</div>
           </div>
+          {avgError != null && (
+            <div className="text-center">
+              <div className="text-[9px] font-bold uppercase tracking-wider text-gray-600 mb-0.5">Avg MAE</div>
+              <div className="font-bold tabular-nums"
+                style={{ color: avgError < 8 ? '#34D399' : avgError < 16 ? '#FBBF24' : '#F87171' }}>
+                {avgError.toFixed(1)} pts
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Chevron */}
-        <svg
-          className={`chevron shrink-0 ${isOpen ? 'open' : ''}`}
-          width="16" height="16" viewBox="0 0 16 16" fill="none"
-        >
+        <svg className={`chevron shrink-0 ${isOpen ? 'open' : ''}`} width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M4 6l4 4 4-4" stroke="#6B7280" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </div>
 
-      {/* ── Collapsible games grid ── */}
       <div className={`games-grid ${isOpen ? 'open' : ''}`}>
         <div className="games-grid-inner">
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 px-4 pb-5 pt-2">
             {games.map((game, idx) => (
-              <GameCard key={game.game_id} game={game} league={league} index={idx} />
+              <GameCard key={game.game_id} game={game} league={league} index={idx} isPast={isPast} />
             ))}
           </div>
         </div>
@@ -445,7 +597,7 @@ function LeagueAccordion({ league, games, isOpen, onToggle }) {
   );
 }
 
-// ── Manual Prediction Form ────────────────────────────────────────────────────
+// ── ManualPredictForm ─────────────────────────────────────────────────────────
 
 function ManualPredictForm() {
   const [league,  setLeague]  = useState('euroleague');
@@ -459,9 +611,7 @@ function ManualPredictForm() {
 
   const submit = useCallback(async () => {
     if (!canSubmit) return;
-    setLoading(true);
-    setError(null);
-    setResult(null);
+    setLoading(true); setError(null); setResult(null);
     try {
       const res = await fetch('/predict/game', {
         method: 'POST',
@@ -481,11 +631,9 @@ function ManualPredictForm() {
   const inputCls = "w-full bg-[#0a1520] border border-[#1e2d3d] rounded-xl px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600 transition-colors";
 
   return (
-    <div
-      className="rounded-2xl overflow-hidden mt-6"
-      style={{ border: '1px solid #1e2d3d', background: 'linear-gradient(160deg, #0b1622 0%, #0f1e2e 100%)' }}
-    >
-      {/* Header */}
+    <div className="rounded-2xl overflow-hidden mt-6"
+      style={{ border: '1px solid #1e2d3d', background: 'linear-gradient(160deg, #0b1622 0%, #0f1e2e 100%)' }}>
+
       <div className="px-5 py-4 border-b border-[#1e2d3d] flex items-center gap-2.5">
         <span className="text-base">🎯</span>
         <div>
@@ -494,71 +642,38 @@ function ManualPredictForm() {
         </div>
       </div>
 
-      {/* Form */}
       <div className="px-5 py-5">
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-
-          {/* League */}
           <div>
             <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">League</label>
-            <select
-              value={league}
-              onChange={e => setLeague(e.target.value)}
-              className={inputCls + ' cursor-pointer'}
-              style={{ appearance: 'none' }}
-            >
-              {ALL_LEAGUES.map(lg => (
-                <option key={lg} value={lg}>{leagueName(lg)}</option>
-              ))}
+            <select value={league} onChange={e => setLeague(e.target.value)}
+              className={inputCls + ' cursor-pointer'} style={{ appearance: 'none' }}>
+              {ALL_LEAGUES.map(lg => <option key={lg} value={lg}>{leagueName(lg)}</option>)}
             </select>
           </div>
-
-          {/* Away team */}
           <div>
             <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">Away Team</label>
-            <input
-              type="text"
-              value={away}
-              onChange={e => setAway(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && submit()}
-              placeholder="e.g. Real Madrid"
-              className={inputCls}
-            />
+            <input type="text" value={away} onChange={e => setAway(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submit()} placeholder="e.g. Real Madrid" className={inputCls} />
           </div>
-
-          {/* Home team */}
           <div>
             <label className="block text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">Home Team</label>
-            <input
-              type="text"
-              value={home}
-              onChange={e => setHome(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && submit()}
-              placeholder="e.g. FC Barcelona"
-              className={inputCls}
-            />
+            <input type="text" value={home} onChange={e => setHome(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submit()} placeholder="e.g. FC Barcelona" className={inputCls} />
           </div>
-
-          {/* Submit */}
           <div>
-            <button
-              onClick={submit}
-              disabled={!canSubmit}
+            <button onClick={submit} disabled={!canSubmit}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
               style={{
-                background: canSubmit
-                  ? 'linear-gradient(135deg, #1d4ed8 0%, #6d28d9 100%)'
-                  : '#1e2d3d',
+                background: canSubmit ? 'linear-gradient(135deg, #1d4ed8 0%, #6d28d9 100%)' : '#1e2d3d',
                 boxShadow: canSubmit ? '0 4px 16px rgba(37,99,235,0.3)' : 'none',
-              }}
-            >
+              }}>
               {loading ? <span className="spinner" /> : <span>🔮</span>}
               {loading ? 'Predicting…' : 'Predict'}
             </button>
           </div>
         </div>
 
-        {/* Error */}
         {error && (
           <div className="mt-4 bg-red-950 border border-red-800 rounded-xl p-3 flex items-start gap-2">
             <span>⚠️</span>
@@ -573,12 +688,11 @@ function ManualPredictForm() {
           </div>
         )}
 
-        {/* Result card */}
         {result && (
           <div className="mt-5">
             <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-3">Result</p>
             <div className="max-w-sm">
-              <GameCard game={result} league={result.league} index={0} />
+              <GameCard game={result} league={result.league} index={0} isPast={false} />
             </div>
           </div>
         )}
@@ -597,6 +711,10 @@ function App() {
   const [lastFetched,     setLastFetched]     = useState(null);
   const [selectedLeagues, setSelectedLeagues] = useState([]);
   const [openLeagues,     setOpenLeagues]     = useState(new Set());
+  const [selectedDate,    setSelectedDate]    = useState(localDateStr(0));
+
+  const today    = localDateStr(0);
+  const isPast   = selectedDate < today;
 
   const toggleLeague = useCallback((lg) => {
     setSelectedLeagues(prev =>
@@ -626,27 +744,25 @@ function App() {
   const allExpanded = leagueCount > 0 && openLeagues.size === leagueCount;
   const toggleAll = useCallback(() => {
     setOpenLeagues(prev =>
-      prev.size === leagueCount
-        ? new Set()
-        : new Set(Object.keys(groupedGames))
+      prev.size === leagueCount ? new Set() : new Set(Object.keys(groupedGames))
     );
   }, [leagueCount, groupedGames]);
 
-  const fetchPredictions = useCallback(async () => {
+  const fetchPredictions = useCallback(async (dateStr, leagues) => {
     setLoading(true);
     setError(null);
     setWarnings([]);
     setPredictions([]);
 
     const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 45_000); // 45s (leagues run in parallel)
+    const timeout    = setTimeout(() => controller.abort(), 45_000);
 
     try {
-      const params = selectedLeagues.length > 0
-        ? '?' + selectedLeagues.map(l => 'leagues=' + encodeURIComponent(l)).join('&')
-        : '';
+      const params = new URLSearchParams();
+      params.set('date', dateStr);
+      (leagues.length > 0 ? leagues : []).forEach(l => params.append('leagues', l));
 
-      const res = await fetch('/predict/today' + params, { signal: controller.signal });
+      const res = await fetch('/predict/today?' + params.toString(), { signal: controller.signal });
       clearTimeout(timeout);
 
       if (!res.ok) {
@@ -654,23 +770,38 @@ function App() {
         throw new Error(data.detail ?? `Server error ${res.status}`);
       }
       const data = await res.json();
-      const games = data.games ?? [];
-      setPredictions(games);
+      setPredictions(data.games ?? []);
       setWarnings(data.warnings ?? []);
       setLastFetched(new Date());
-      // Auto-open leagues that have games, collapsed by default (user expands)
       setOpenLeagues(new Set());
     } catch (e) {
       clearTimeout(timeout);
       if (e.name === 'AbortError') {
-        setError('Request timed out. Make sure the prediction server is running: uvicorn src.api.main:app --port 8080');
+        setError('Request timed out. Make sure the server is running: uvicorn src.api.main:app --port 8000');
       } else {
         setError(e.message);
       }
     } finally {
       setLoading(false);
     }
-  }, [selectedLeagues]);
+  }, []);
+
+  // Auto-fetch whenever the selected date changes
+  useEffect(() => {
+    fetchPredictions(selectedDate, selectedLeagues);
+  }, [selectedDate]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-fetch when league filter changes (only if we already have data)
+  const handleLeagueToggle = useCallback((lg) => {
+    setSelectedLeagues(prev => {
+      const next = prev.includes(lg) ? prev.filter(l => l !== lg) : [...prev, lg];
+      return next;
+    });
+  }, []);
+
+  const handleDateChange = useCallback((d) => {
+    setSelectedDate(d);
+  }, []);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
@@ -685,10 +816,13 @@ function App() {
           </div>
         </div>
         <div className="text-right">
-          <p className="text-xs text-gray-500">Today</p>
-          <p className="text-sm font-semibold text-gray-300">{todayStr()}</p>
+          <p className="text-xs text-gray-500">{isPast ? 'Showing history for' : selectedDate === localDateStr(1) ? 'Predicting' : 'Predicting'}</p>
+          <p className="text-sm font-semibold text-gray-300">{formatDisplayDate(selectedDate)}</p>
         </div>
       </header>
+
+      {/* ── Date navigation ── */}
+      <DateNav selectedDate={selectedDate} onChange={handleDateChange} />
 
       {/* ── League filter pills ── */}
       <div className="flex flex-wrap gap-2 mb-5">
@@ -719,10 +853,10 @@ function App() {
         )}
       </div>
 
-      {/* ── Predict button ── */}
+      {/* ── Action bar: Refresh + status ── */}
       <div className="flex items-center gap-4 mb-10">
         <button
-          onClick={fetchPredictions}
+          onClick={() => fetchPredictions(selectedDate, selectedLeagues)}
           disabled={loading}
           className="flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm text-white transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
           style={{
@@ -730,14 +864,22 @@ function App() {
             boxShadow: loading ? 'none' : '0 4px 20px rgba(37,99,235,0.4)',
           }}
         >
-          {loading ? <span className="spinner" /> : <span>🔮</span>}
-          {loading ? 'Fetching predictions…' : "Predict Today's Games"}
+          {loading ? <span className="spinner" /> : <span>{isPast ? '📋' : '🔮'}</span>}
+          {loading
+            ? (isPast ? 'Loading history…' : 'Fetching predictions…')
+            : (isPast ? `Load ${dateLabel(selectedDate)} Predictions` : `Predict ${dateLabel(selectedDate)} Games`)
+          }
         </button>
 
         {lastFetched && !loading && (
           <p className="text-sm text-gray-400">
             <span className="text-white font-semibold">{predictions.length}</span> games ·{' '}
             <span className="text-white font-semibold">{leagueCount}</span> league{leagueCount !== 1 ? 's' : ''}
+            {isPast && predictions.filter(g => g.actual_total != null && g.actual_total > 0).length > 0 && (
+              <span className="ml-2 text-gray-500">
+                · {predictions.filter(g => g.actual_total != null && g.actual_total > 0).length} results in
+              </span>
+            )}
           </p>
         )}
       </div>
@@ -747,7 +889,7 @@ function App() {
         <div className="bg-red-950 border border-red-800 rounded-xl p-4 mb-8 flex items-start gap-3">
           <span className="text-xl">⚠️</span>
           <div>
-            <p className="font-semibold text-red-300 text-sm">Prediction failed</p>
+            <p className="font-semibold text-red-300 text-sm">Failed to load predictions</p>
             <p className="text-red-400 text-xs mt-1">{error}</p>
           </div>
         </div>
@@ -756,9 +898,16 @@ function App() {
       {/* ── Empty state ── */}
       {lastFetched && !loading && predictions.length === 0 && !error && (
         <div className="text-center py-20 text-gray-600">
-          <p className="text-5xl mb-4">📅</p>
-          <p className="text-lg font-semibold">No games scheduled today</p>
-          <p className="text-sm mt-1">Check back tomorrow or try a different league filter.</p>
+          <p className="text-5xl mb-4">{isPast ? '📋' : '📅'}</p>
+          <p className="text-lg font-semibold">
+            {isPast ? 'No predictions found for this date' : 'No games scheduled'}
+          </p>
+          <p className="text-sm mt-1">
+            {isPast
+              ? 'Predictions are only stored for dates when predict-today was run.'
+              : 'Check back later or try a different date.'
+            }
+          </p>
         </div>
       )}
 
@@ -791,6 +940,7 @@ function App() {
           games={games}
           isOpen={openLeagues.has(league)}
           onToggle={() => toggleLeagueOpen(league)}
+          isPast={isPast}
         />
       ))}
 
@@ -798,10 +948,7 @@ function App() {
       {warnings.length > 0 && (
         <div className="mt-4 space-y-1.5">
           {warnings.map((w, i) => (
-            <div
-              key={i}
-              className="text-[11px] text-yellow-600 bg-yellow-950/40 border border-yellow-900/60 rounded-lg px-3 py-2"
-            >
+            <div key={i} className="text-[11px] text-yellow-600 bg-yellow-950/40 border border-yellow-900/60 rounded-lg px-3 py-2">
               ⚠ {w}
             </div>
           ))}

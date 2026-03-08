@@ -6,7 +6,7 @@ GET /predict/{game_id}   — fetch a stored prediction by game_id
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -63,10 +63,11 @@ async def _process_league(
     gold_df,
     adjuster: InjuryAdjuster,
     now: datetime,
+    target_date: date | None = None,
 ) -> tuple[list[PredictionResponse], list[str]]:
     """Fetch + predict for one league. Returns (predictions, warnings)."""
     try:
-        games = await scraper.fetch_today(league)
+        games = await scraper.fetch_today(league, target_date)
         if not games:
             logger.info("No games today for league={}", league)
             return [], []
@@ -96,25 +97,48 @@ async def _process_league(
 @router.get("/today", response_model=TodayPredictionsResponse)
 async def predict_today(
     leagues: Optional[list[str]] = Query(default=None),
+    date_param: Optional[str] = Query(default=None, alias="date",
+                                      description="Date to predict (YYYY-MM-DD / 'today' / 'tomorrow' / 'yesterday')"),
 ) -> TodayPredictionsResponse:
     """
     Full daily prediction pipeline — all leagues run concurrently.
+    Pass ?date=YYYY-MM-DD (or 'today'/'tomorrow'/'yesterday') to predict a specific date.
+    Past dates are served from the tracker CSV without re-running the model.
     Each league is capped at 20 s; failures are skipped with a warning.
     """
-    ensemble = _get_ensemble()
-    active_leagues = leagues or LEAGUES
+    # Resolve target date
     today = date.today()
+    if date_param is None or date_param.lower() == "today":
+        target_date = today
+    elif date_param.lower() == "tomorrow":
+        target_date = today + timedelta(days=1)
+    elif date_param.lower() == "yesterday":
+        target_date = today - timedelta(days=1)
+    else:
+        try:
+            target_date = date.fromisoformat(date_param)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date: {date_param!r}. Use YYYY-MM-DD.")
+
+    active_leagues = leagues or LEAGUES
+
+    # Past dates: serve stored predictions from tracker (no model re-run needed)
+    if target_date < today:
+        return _predictions_from_tracker(target_date, active_leagues)
+
+    # Today or future: live schedule + model
+    ensemble = _get_ensemble()
     now = datetime.now(_TZ)
 
-    scraper       = LiveScheduleFetcher()
+    scraper        = LiveScheduleFetcher()
     injury_scraper = InjuryScraper()
-    odds_client   = OddsClient()
-    gold_df       = load_gold()
-    adjuster      = InjuryAdjuster.from_silver()  # load once, share across leagues
+    odds_client    = OddsClient()
+    gold_df        = load_gold()
+    adjuster       = InjuryAdjuster.from_silver()
 
     if gold_df.empty:
         return TodayPredictionsResponse(
-            date=today, leagues=active_leagues, games=[],
+            date=target_date, leagues=active_leagues, games=[],
             model_loaded=True, warnings=["Gold table empty — run build-gold first"],
         )
 
@@ -122,7 +146,7 @@ async def predict_today(
         try:
             return await asyncio.wait_for(
                 _process_league(league, scraper, injury_scraper, odds_client,
-                                ensemble, gold_df, adjuster, now),
+                                ensemble, gold_df, adjuster, now, target_date),
                 timeout=_LEAGUE_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -138,11 +162,56 @@ async def predict_today(
         all_warnings.extend(warns)
 
     return TodayPredictionsResponse(
-        date=today,
+        date=target_date,
         leagues=active_leagues,
         games=all_predictions,
         model_loaded=True,
         warnings=all_warnings,
+    )
+
+
+def _predictions_from_tracker(target_date: date, active_leagues: list[str]) -> TodayPredictionsResponse:
+    """Return stored predictions for a past date from the tracker CSV."""
+    import csv
+    tracker = settings.tracking_path
+    if not tracker.exists():
+        return TodayPredictionsResponse(
+            date=target_date, leagues=active_leagues, games=[],
+            model_loaded=True, warnings=["No tracker file found. Run predict-today first."],
+        )
+
+    league_set = set(active_leagues)
+    seen: dict[str, PredictionResponse] = {}
+    with open(tracker, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                row_date = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_date != target_date:
+                continue
+            if row.get("league") not in league_set:
+                continue
+            pred = _tracker_row_to_prediction(row)
+            # Attach post-game actuals if present
+            if row.get("actual_total"):
+                try:
+                    pred.actual_total = float(row["actual_total"])
+                except ValueError:
+                    pass
+            if row.get("error"):
+                try:
+                    pred.result_error = float(row["error"])
+                except ValueError:
+                    pass
+            seen[pred.game_id] = pred  # last write wins (dedup)
+
+    return TodayPredictionsResponse(
+        date=target_date,
+        leagues=active_leagues,
+        games=list(seen.values()),
+        model_loaded=True,
+        warnings=[] if seen else [f"No predictions found for {target_date}."],
     )
 
 
@@ -371,6 +440,7 @@ def _append_tracker(pred: PredictionResponse, game: dict) -> None:
         "date", "league", "match", "game_id",
         "book_total", "book_spread",
         "model_total_mean", "model_total_p10", "model_total_p90",
+        "model_home_mean", "model_away_mean",
         "confidence", "edge",
         "actual_total", "error",
         "odds_source", "timestamp",
@@ -385,6 +455,8 @@ def _append_tracker(pred: PredictionResponse, game: dict) -> None:
         "model_total_mean": pred.model_total_mean,
         "model_total_p10": pred.model_total_p10,
         "model_total_p90": pred.model_total_p90,
+        "model_home_mean": pred.model_home_mean,
+        "model_away_mean": pred.model_away_mean,
         "confidence": pred.confidence,
         "edge": pred.edge or "",
         "actual_total": "",   # filled in post-game
@@ -412,8 +484,8 @@ def _tracker_row_to_prediction(row: dict) -> PredictionResponse:
         model_total_p10=float(row.get("model_total_p10", 0)),
         model_total_p50=float(row.get("model_total_mean", 0)),
         model_total_p90=float(row.get("model_total_p90", 0)),
-        model_home_mean=0.0,
-        model_away_mean=0.0,
+        model_home_mean=float(row.get("model_home_mean", 0)),
+        model_away_mean=float(row.get("model_away_mean", 0)),
         confidence=float(row.get("confidence", 0)),
         edge=float(row["edge"]) if row.get("edge") else None,
         odds_source=row.get("odds_source"),
