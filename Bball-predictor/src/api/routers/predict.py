@@ -422,12 +422,46 @@ def _predict_games(
     return predictions
 
 
+_TRACKER_FIELDS = [
+    "date", "league", "match", "game_id",
+    "book_total", "book_spread",
+    "model_total_mean", "model_total_p10", "model_total_p90",
+    "model_home_mean", "model_away_mean",
+    "confidence", "edge",
+    "total_recommendation", "home_recommendation", "away_recommendation",
+    "actual_total", "error",
+    "odds_source", "timestamp",
+]
+
+
+def _ensure_tracker_schema(tracker) -> None:
+    """Migrate existing tracker CSV to include any new columns (added in-place)."""
+    import csv
+    if not tracker.exists():
+        return
+    with open(tracker, newline="") as f:
+        reader = csv.DictReader(f)
+        existing_fields = list(reader.fieldnames or [])
+        rows = list(reader)
+    missing = [c for c in _TRACKER_FIELDS if c not in existing_fields]
+    if not missing:
+        return
+    with open(tracker, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_TRACKER_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            for col in missing:
+                row.setdefault(col, "")
+            writer.writerow({k: row.get(k, "") for k in _TRACKER_FIELDS})
+
+
 def _append_tracker(pred: PredictionResponse, game: dict) -> None:
     """Append prediction to daily_tracker.csv, skipping if game_id already exists."""
     import csv
     tracker = settings.tracking_path
     tracker.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not tracker.exists()
+
+    _ensure_tracker_schema(tracker)
 
     # Skip duplicate entries (same game predicted multiple times in one day)
     if tracker.exists():
@@ -436,15 +470,6 @@ def _append_tracker(pred: PredictionResponse, game: dict) -> None:
                 if row.get("game_id") == pred.game_id:
                     return
 
-    fields = [
-        "date", "league", "match", "game_id",
-        "book_total", "book_spread",
-        "model_total_mean", "model_total_p10", "model_total_p90",
-        "model_home_mean", "model_away_mean",
-        "confidence", "edge",
-        "actual_total", "error",
-        "odds_source", "timestamp",
-    ]
     row = {
         "date": pred.date.isoformat(),
         "league": pred.league,
@@ -455,41 +480,69 @@ def _append_tracker(pred: PredictionResponse, game: dict) -> None:
         "model_total_mean": pred.model_total_mean,
         "model_total_p10": pred.model_total_p10,
         "model_total_p90": pred.model_total_p90,
-        "model_home_mean": pred.model_home_mean,
-        "model_away_mean": pred.model_away_mean,
+        "model_home_mean": pred.model_home_mean or "",
+        "model_away_mean": pred.model_away_mean or "",
         "confidence": pred.confidence,
         "edge": pred.edge or "",
+        "total_recommendation": pred.total_recommendation or "",
+        "home_recommendation": pred.home_recommendation or "",
+        "away_recommendation": pred.away_recommendation or "",
         "actual_total": "",   # filled in post-game
         "error": "",          # filled in post-game
         "odds_source": pred.odds_source or "",
         "timestamp": pred.timestamp.isoformat(),
     }
 
+    write_header = not tracker.exists()
     with open(tracker, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
+        writer = csv.DictWriter(f, fieldnames=_TRACKER_FIELDS)
         if write_header:
             writer.writeheader()
         writer.writerow(row)
 
 
 def _tracker_row_to_prediction(row: dict) -> PredictionResponse:
+    book_total = float(row["book_total"]) if row.get("book_total") else None
+    model_mean = float(row.get("model_total_mean", 0))
+    home_mean  = float(row.get("model_home_mean", 0)) if row.get("model_home_mean") else None
+    away_mean  = float(row.get("model_away_mean", 0)) if row.get("model_away_mean") else None
+
+    # Restore stored recommendations; recompute if missing (old rows)
+    total_rec = row.get("total_recommendation") or None
+    home_rec  = row.get("home_recommendation")  or None
+    away_rec  = row.get("away_recommendation")  or None
+    if not total_rec and book_total and model_mean:
+        total_rec = "OVER" if model_mean > book_total else "UNDER"
+    if not home_rec and book_total and home_mean:
+        half = book_total / 2
+        home_rec = "OVER" if home_mean > half else "UNDER"
+        away_rec = "OVER" if (away_mean or 0) > half else "UNDER"
+
+    actual = float(row["actual_total"]) if row.get("actual_total") else None
+    error  = float(row["error"])        if row.get("error")        else None
+
     return PredictionResponse(
         game_id=row.get("game_id", ""),
         league=row.get("league", ""),
         match=row.get("match", ""),
         date=date.fromisoformat(row["date"]),
-        book_total=float(row["book_total"]) if row.get("book_total") else None,
+        book_total=book_total,
         book_spread=float(row["book_spread"]) if row.get("book_spread") else None,
-        model_total_mean=float(row.get("model_total_mean", 0)),
+        model_total_mean=model_mean,
         model_total_p10=float(row.get("model_total_p10", 0)),
-        model_total_p50=float(row.get("model_total_mean", 0)),
+        model_total_p50=model_mean,
         model_total_p90=float(row.get("model_total_p90", 0)),
-        model_home_mean=float(row.get("model_home_mean", 0)),
-        model_away_mean=float(row.get("model_away_mean", 0)),
+        model_home_mean=home_mean or 0.0,
+        model_away_mean=away_mean or 0.0,
         confidence=float(row.get("confidence", 0)),
         edge=float(row["edge"]) if row.get("edge") else None,
-        odds_source=row.get("odds_source"),
+        odds_source=row.get("odds_source") or None,
         timestamp=datetime.fromisoformat(row["timestamp"]) if row.get("timestamp") else datetime.now(_TZ),
+        total_recommendation=total_rec,
+        home_recommendation=home_rec,
+        away_recommendation=away_rec,
+        actual_total=actual,
+        result_error=error,
     )
 
 
